@@ -1,0 +1,60 @@
+/*
+ * 前端样式。原生 CSS，不引入任何构建工具链。
+ *
+ * 尚未实现（P1）。届时需要覆盖：
+ *   - 元素表（带序号、role、当前值）与概率条
+ *   - 目标高亮叠加层（按元素 rect 的百分比定位，hover 时显示）
+ *   - 动作轨迹列表（步号、动作、耗时、页面是否变化）
+ *   - 三层断言的逐条结果，其中 skipped 必须与 passed / failed 视觉上明显不同
+ *   - 护栏命中时的红色横幅
+ */
+
+body {
+  margin: 0;
+  padding: 2rem;
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  line-height: 1.6;
+  color: #1a1a1a;
+  background: #fafafa;
+}
+
+main {
+  max-width: 46rem;
+  margin: 0 auto;
+}
+
+h1 {
+  margin: 0 0 0.5rem;
+  font-size: 1.6rem;
+}
+
+.status {
+  color: #b45309;
+  font-weight: 600;
+}
+
+.hint {
+  color: #52525b;
+  font-size: 0.9rem;
+}
+
+code {
+  padding: 0.1rem 0.35rem;
+  border-radius: 4px;
+  background: #e4e4e7;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.85em;
+}
+
+@media (prefers-color-scheme: dark) {
+  body {
+    color: #e4e4e7;
+    background: #18181b;
+  }
+  .hint {
+    color: #a1a1aa;
+  }
+  code {
+    background: #27272a;
+  }
+}

@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!--
+      令牌占位符由 server.ts 在读取本文件时替换为进程启动时生成的一次性令牌。
+      前端每个请求都要带 X-Jevtest-Token 头，见 src/web/security.ts。
+      这正是「只有能读到本页面的代码才拿得到令牌」这条防线的工作方式。
+    -->
+    <meta name="jevtest-token" content="__JEVTEST_TOKEN__" />
+    <title>jevtest</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <main>
+      <h1>jevtest</h1>
+      <p class="status">界面尚未实现（P1）。</p>
+      <p class="hint">
+        当前骨架只包含模块与接口定义。先用命令行跑通用例：
+        <code>npm run dev -- run cases/wikipedia-godel.yaml</code>
+      </p>
+    </main>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
