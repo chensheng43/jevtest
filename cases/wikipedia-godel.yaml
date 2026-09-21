@@ -1,0 +1,72 @@
+# P0 验收用例，也是 docs/case-format.md 的活样例。
+#
+# 选 Wikipedia 的理由：无需准备环境、无需登录、无外网依赖（除 Wikipedia 本身）、
+# 页面结构稳定。参考项目在同一类任务上实测 2.798 秒完成（见其 docs/performance.md），
+# 可作性能基线。
+#
+# 这个文件同时是「格式规范 ↔ schema 实现」一致性的检查对象：
+# tests/schema.test.ts 会解析它、渲染成表单、再反解回对象，断言深度相等。
+
+schemaVersion: 1
+id: wikipedia-godel
+title: Wikipedia 打开哥德尔不完备定理条目
+
+# goal 是唯一的行为指令。**断言不参与其中**——让 agent 看见判分标准
+# 会诱导它对着答案演戏。见 docs/writing-cases.md。
+goal: >-
+  On Wikipedia, find and open the article about Gödel's incompleteness theorems.
+  Stop when that article is displayed.
+
+startUrl: https://en.wikipedia.org/wiki/Main_Page
+
+# interactive 允许输入与点击；readonly 下变更型操作不会进入候选集。
+mode: interactive
+
+# 域名白名单。缺省时由 startUrl 的 origin 推导，这里显式写出作为示范。
+# 越界即终止为 guardrail_blocked——防的是 agent 顺着外链跑出被测系统。
+allowedOrigins:
+  - https://en.wikipedia.org
+
+budget:
+  maxSteps: 12
+  maxModelCalls: 24
+  maxInputTokens: 150000
+  # 不设金额上限：引擎未必报金额，用 null 表示「未知」而不是 0。
+  maxCostUsd: null
+  maxElapsedMs: 45000
+
+# 追加在**内置默认护栏之上**。内置集（删除/支付/下单/密码框等）只增不减，
+# 要移除必须显式 allowDefaultOverride: true，且报告会打红色横幅。
+guardrails:
+  - labelContains: Create account
+    reason: 测试不允许创建账号
+  - labelContains: Donate
+    reason: 测试不允许捐赠
+
+# status 描述循环如何结束，passed 由这里的断言决定，两者相互独立。
+# status: done 而 passed: false 是完全正常的组合。
+assertions:
+  final:
+    # 推荐用 matches/contains 而非 equals：URL 带 query 时全等很脆。
+    url:
+      matches:
+        - "Gödel|Incompleteness"
+    text:
+      contains:
+        - incompleteness
+      notContains:
+        - Search results
+  trajectory:
+    statusIn:
+      - done
+    maxSteps: 12
+    # 必须真的通过搜索框走，而不是靠某个直达链接蒙对。
+    mustUse:
+      - role: searchbox
+    # 护栏之外的额外轨迹约束；命中同样会在执行前拦截。
+    mustNotUse:
+      - labelContains: Log in
+  quality:
+    # 低于此值说明模型在犹豫，用例不稳——不是本次失败，而是需要关注。
+    minOperationProbability: 0.4
+    maxModelCalls: 24
