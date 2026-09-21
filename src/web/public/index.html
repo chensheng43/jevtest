@@ -10,16 +10,43 @@
     -->
     <meta name="jevtest-token" content="__JEVTEST_TOKEN__" />
     <title>jevtest</title>
+    <script>
+      /*
+       * Bootstrap 5.3 不会自己跟随系统主题：必须显式写 data-bs-theme。
+       * 放在 <head> 里内联执行，是为了在首屏绘制前就把主题定下来——
+       * 挪到 app.js（module，defer 语义）会先闪一下浅色。
+       */
+      (() => {
+        const query = window.matchMedia("(prefers-color-scheme: dark)");
+        const apply = () => {
+          document.documentElement.dataset.bsTheme = query.matches ? "dark" : "light";
+        };
+        apply();
+        query.addEventListener("change", apply);
+      })();
+    </script>
+    <!--
+      Bootstrap 直接从 node_modules 引，不进打包器——这是 /vendor/ 这条路由存在的目的
+      （见 src/web/server.ts 与 security.ts 的 VENDOR_EXTENSIONS）。
+    -->
+    <link rel="stylesheet" href="/vendor/bootstrap/dist/css/bootstrap.min.css" />
     <link rel="stylesheet" href="/style.css" />
   </head>
   <body>
     <header class="topbar">
-      <a class="brand" href="#/cases">jevtest</a>
-      <nav>
-        <a href="#/cases">用例</a>
-        <a href="#/runs">运行历史</a>
-        <a href="#/new">新建用例</a>
+      <a class="brand" href="#/cases">
+        <span class="brand-mark" aria-hidden="true"></span>
+        <span class="brand-name">jevtest</span>
+      </a>
+      <nav id="nav">
+        <a href="#/cases" data-nav="cases">用例</a>
+        <a href="#/runs" data-nav="runs">运行历史</a>
+        <a href="#/new" data-nav="new">导入</a>
       </nav>
+      <!--
+        `refreshQueue()` 每次轮询整体覆写本元素的 textContent，并顺带设 data-state。
+        状态点因此必须由 CSS 伪元素画——加子节点会被下一次覆写抹掉。
+      -->
       <span class="queue" id="queue" title="在途浏览器 context 数，运行结束后应回到 0"></span>
     </header>
     <main id="app"></main>

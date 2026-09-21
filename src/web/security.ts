@@ -36,9 +36,13 @@ export const MAX_BODY_BYTES = 8192;
  * `/vendor/*` 允许的扩展名。
  *
  * 白名单而不是黑名单：动态文件服务是全项目唯一的目录穿越风险点，
- * 「只放行已知安全的三种」比「拦掉已知危险的若干种」少一个需要持续维护的判断。
+ * 「只放行已知安全的几种」比「拦掉已知危险的若干种」少一个需要持续维护的判断。
+ *
+ * `.css` 是给 Bootstrap 用的（`/vendor/bootstrap/dist/css/*.min.css`）。
+ * 它不引入新的风险面：这里是**静态读取**，扩展名只决定「能不能读」，
+ * 不存在「按内容执行」的路径，而 `.css` 又不像 `.html` 那样会被注入令牌。
  */
-export const VENDOR_EXTENSIONS: readonly string[] = [".js", ".map", ".json"];
+export const VENDOR_EXTENSIONS: readonly string[] = [".js", ".map", ".json", ".css"];
 
 export interface SecurityContext {
   token: string;

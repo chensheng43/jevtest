@@ -1,255 +1,394 @@
 /*
- * 前端样式。原生 CSS，不引入任何构建工具链。
+ * 前端样式：**Bootstrap 5 之上的一层薄自定义**，不引入任何构建工具链。
  *
- * 一条不能省的视觉约束（D9）：**「跳过」必须与「通过」「失败」明显不同**。
+ * Bootstrap 提供通用原语（按钮、表单、表格、卡片、alert、栅格与间距工具类），
+ * 这个文件只负责三件 Bootstrap 管不了的事：
+ *
+ *   1. 应用外壳（顶栏、页头、卡片内小节）。
+ *   2. 本项目的**领域语义**：三态判决、事件时间线、统计条、截图缩略图。
+ *   3. D9 / D8 那条不能省的视觉约束——见下面 §3。
+ *
+ * 颜色一律走 Bootstrap 的 CSS 变量（`--bs-*`）而不是写死的色值：
+ * 这样深色模式由 `[data-bs-theme="dark"]` 一并接管，这里不需要第二套配色。
+ *
+ * ---------------------------------------------------------------------------
+ * D9：**「跳过」必须与「通过」「失败」明显不同。**
  * 把 skipped 画成绿色等于在界面上谎报覆盖——比失败更危险，因为它让人以为测过了。
- * 所以三态各有自己的颜色与底色，且跳过头像刻意不太显眼（它既不是好消息也不是坏消息）。
+ * 所以三态取三个不同的色系，且「跳过」刻意做得更轻（虚框 + 更小字号）：
+ * 它既不是好消息也不是坏消息。
+ *
+ * D8：`passed: null`（未判定）是**第三种**东西，不是 `false`。
+ * 它走中性灰，既不借用琥珀色（会被读成「跳过」），也不借用红色（会被读成「失败」）。
  */
 
-:root {
-  --bg: #fafafa;
-  --panel: #ffffff;
-  --ink: #1a1a1a;
-  --muted: #6b7280;
-  --line: #e4e4e7;
-  --accent: #1d4ed8;
-  --ok: #15803d;
-  --bad: #b91c1c;
-  --skip: #a16207;
-  --warn-bg: #fef3c7;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #18181b;
-    --panel: #232327;
-    --ink: #e4e4e7;
-    --muted: #a1a1aa;
-    --line: #3f3f46;
-    --accent: #93c5fd;
-    --ok: #4ade80;
-    --bad: #fca5a5;
-    --skip: #fcd34d;
-    --warn-bg: #422006;
-  }
-}
-
-* {
-  box-sizing: border-box;
-}
-
-body {
-  margin: 0;
-  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-  line-height: 1.6;
-  color: var(--ink);
-  background: var(--bg);
-}
+/* =========================================================================
+   1. 应用外壳
+   ========================================================================= */
 
 .topbar {
   display: flex;
   align-items: center;
   gap: 1.25rem;
-  padding: 0.6rem 1.25rem;
-  border-bottom: 1px solid var(--line);
-  background: var(--panel);
+  height: 3.25rem;
+  padding: 0 1.25rem;
+  border-bottom: 1px solid var(--bs-border-color);
+  /* 半透明 + 模糊：滚动时内容从顶栏下面透出来，层级比纯色块清楚。 */
+  background: rgba(var(--bs-body-bg-rgb), 0.85);
+  backdrop-filter: blur(10px);
   position: sticky;
   top: 0;
-  z-index: 10;
+  z-index: 1030;
 }
 
 .brand {
-  font-weight: 700;
-  letter-spacing: 0.02em;
-  color: var(--ink);
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--bs-body-color);
+  text-decoration: none;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.brand:hover {
+  color: var(--bs-body-color);
   text-decoration: none;
 }
 
-.topbar nav {
+.brand-mark {
+  width: 0.8rem;
+  height: 0.8rem;
+  border-radius: 3px;
+  background: var(--bs-primary);
+  flex: none;
+}
+
+#nav {
   display: flex;
-  gap: 1rem;
+  gap: 0.15rem;
+  overflow-x: auto;
 }
 
-.topbar a {
-  color: var(--accent);
+#nav a {
+  padding: 0.3rem 0.65rem;
+  border-radius: var(--bs-border-radius-sm);
+  color: var(--bs-secondary-color);
+  text-decoration: none;
+  font-size: 0.9rem;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+#nav a:hover {
+  color: var(--bs-body-color);
+  background: var(--bs-tertiary-bg);
   text-decoration: none;
 }
 
-.topbar a:hover {
-  text-decoration: underline;
+/* 当前页高亮由 route() 写 aria-current——既是可访问性属性，也正好是样式钩子。 */
+#nav a[aria-current="page"] {
+  color: var(--bs-body-color);
+  background: var(--bs-tertiary-bg);
 }
 
 .queue {
   margin-left: auto;
-  color: var(--muted);
-  font-size: 0.85rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.2rem 0.7rem;
+  border: 1px solid var(--bs-border-color);
+  border-radius: 999px;
+  color: var(--bs-secondary-color);
+  font-size: 0.78rem;
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* 状态点必须是伪元素：refreshQueue() 每次轮询整体覆写 textContent，子节点留不住。 */
+.queue::before {
+  content: "";
+  width: 0.45rem;
+  height: 0.45rem;
+  border-radius: 50%;
+  background: var(--bs-secondary-color);
+  flex: none;
+}
+
+.queue[data-state="ok"]::before {
+  background: var(--bs-success);
+}
+
+.queue[data-state="busy"]::before {
+  background: var(--bs-primary);
+  animation: pulse 1.4s ease-in-out infinite;
+}
+
+.queue[data-state="down"]::before {
+  background: var(--bs-danger);
 }
 
 main {
-  max-width: 62rem;
+  max-width: 72rem;
   margin: 0 auto;
-  padding: 1.5rem 1.25rem 4rem;
+  padding: 1.75rem 1.5rem 5rem;
 }
 
+/* =========================================================================
+   2. 布局小件与文本工具类
+   ========================================================================= */
+
+.page-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  margin-bottom: 1rem;
+}
+
+/*
+ * 标题层级。Bootstrap 的 h1/h2/h4 是 2.5/2/1.5rem——全都比页头那行标题还大，
+ * 不压下去整个页面的层级会倒过来（「实时进度」比「运行 <id>」还醒目）。
+ *
+ * 注意 `.h5` 这类工具类优先级高于元素选择器，所以判决卡里的 `h2.h5` 不受这里影响。
+ */
 h1 {
   font-size: 1.5rem;
-  margin: 0 0 0.75rem;
+  font-weight: 650;
+  letter-spacing: -0.015em;
+  margin: 0 0 0.5rem;
 }
 
 h2 {
-  font-size: 1.1rem;
+  font-size: 1.05rem;
+  font-weight: 600;
   margin: 1.25rem 0 0.5rem;
 }
 
-h4 {
-  font-size: 0.95rem;
-  margin: 0.9rem 0 0.35rem;
-  color: var(--muted);
+.page-head h1 {
+  margin: 0;
 }
 
 .hint {
-  color: var(--muted);
-  font-size: 0.87rem;
+  color: var(--bs-secondary-color);
+  font-size: 0.82rem;
+  line-height: 1.55;
   margin: 0.35rem 0;
 }
 
+/*
+ * 卡片内的小节标题（url / title / controls / mustUse…）。
+ * Bootstrap 的 h4 是 1.5rem——比卡片的 card-header 还大，
+ * 不压下去整个层级会倒过来。
+ */
+h4 {
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--bs-secondary-color);
+  margin: 1.1rem 0 0.4rem;
+}
+
+/* Bootstrap 给 code 配的是品红色。命令与路径用中性配色读起来更像「要照抄的东西」。 */
 code {
-  padding: 0.1rem 0.35rem;
-  border-radius: 4px;
-  background: var(--line);
-  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-  font-size: 0.85em;
+  color: var(--bs-body-color);
+  background: var(--bs-tertiary-bg);
+  padding: 0.1em 0.35em;
+  border-radius: var(--bs-border-radius-sm);
 }
 
-/* ---------- 表格 ---------- */
-
-table.grid {
-  width: 100%;
-  border-collapse: collapse;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  overflow: hidden;
-}
-
-table.grid th,
-table.grid td {
-  padding: 0.45rem 0.6rem;
-  text-align: left;
-  border-bottom: 1px solid var(--line);
-  font-size: 0.9rem;
-  vertical-align: top;
-}
-
-table.grid th {
-  color: var(--muted);
+.hint strong {
+  color: var(--bs-body-color);
   font-weight: 600;
-  background: color-mix(in srgb, var(--line) 40%, transparent);
 }
 
-table.grid tr:last-child td {
-  border-bottom: none;
-}
-
+/* 数据与 UI 文本分离：ID、时间戳、路径、事件走等宽。
+   比例字体的数字宽度会跳，扫读一列时间戳时非常明显。 */
+.mono,
 td.path {
-  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-family: var(--bs-font-monospace);
   font-size: 0.82rem;
+  font-variant-numeric: tabular-nums;
 }
 
-/* ---------- 三态：passed / failed / skipped ---------- */
-
-.passed {
-  color: var(--ok);
+.blocking {
+  color: var(--bs-danger);
   font-weight: 600;
+  margin: 0.3rem 0;
 }
 
-.failed {
-  color: var(--bad);
-  font-weight: 600;
+/* 药丸 + 说明的竖排。横向并排会让长原因撑宽单元格。 */
+.stack {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.2rem;
 }
 
-.skipped {
-  color: var(--skip);
-  font-weight: 600;
-  font-style: italic;
+/* =========================================================================
+   3. 判决语义（D9 + D8）—— 本文件最要紧的一段
+   ========================================================================= */
+
+/* 三个色系分别对应 success / danger / warning，彼此不可能撞色。 */
+.badge--passed {
+  color: var(--bs-success-text-emphasis);
+  background-color: var(--bs-success-bg-subtle);
+  border: 1px solid var(--bs-success-border-subtle);
 }
 
-.running {
-  color: var(--muted);
-  font-weight: 600;
+.badge--failed {
+  color: var(--bs-danger-text-emphasis);
+  background-color: var(--bs-danger-bg-subtle);
+  border: 1px solid var(--bs-danger-border-subtle);
 }
 
-.verdict {
-  text-decoration: none;
+/*
+ * D9：跳过**刻意**比通过/失败轻——虚框、更小字号、无底色。
+ * 它既不是好消息也不是坏消息，但绝不能看起来像「通过」。
+ */
+.badge--skipped {
+  color: var(--bs-warning-text-emphasis);
+  background-color: transparent;
+  border: 1px dashed var(--bs-warning-border-subtle);
+  font-size: 0.68rem;
+  font-weight: 500;
 }
 
+/*
+ * D8：未判定（passed === null）是第三种东西。
+ * 中性灰、无倾向色——借用琥珀色会被读成「跳过」，借用红色会被读成「失败」。
+ */
+.badge--undecided {
+  color: var(--bs-secondary-color);
+  background-color: var(--bs-secondary-bg-subtle);
+  border: 1px solid var(--bs-border-color);
+  font-weight: 500;
+}
+
+.badge--running {
+  color: var(--bs-secondary-color);
+  background-color: var(--bs-secondary-bg-subtle);
+  border: 1px solid var(--bs-border-color);
+}
+
+.badge--running .glyph {
+  animation: pulse 1.4s ease-in-out infinite;
+}
+
+/* status（循环怎么结束的）与 passed（断言判决）是两件事，
+   所以前者用中性描边，视觉上不与判决争主次。 */
+.badge--status {
+  color: var(--bs-secondary-color);
+  background-color: transparent;
+  border: 1px solid var(--bs-border-color);
+  font-weight: 500;
+}
+
+.badge .glyph {
+  font-size: 0.9em;
+  line-height: 1;
+}
+
+/* 运行结果卡：左侧色条直接承载判决，扫一眼就知道这次跑挂了没有。 */
 .verdict-card {
-  border-left: 5px solid var(--line);
+  border-left: 4px solid var(--bs-border-color) !important;
 }
 
 .verdict-card.passed {
-  border-left-color: var(--ok);
+  border-left-color: var(--bs-success) !important;
 }
 
 .verdict-card.failed {
-  border-left-color: var(--bad);
+  border-left-color: var(--bs-danger) !important;
 }
 
-.verdict-card.skipped {
-  border-left-color: var(--skip);
+/* D8：未判定的色条走中性灰，与药丸的档位一致——琥珀色会被读成「跳过」。 */
+.verdict-card.undecided {
+  border-left-color: var(--bs-secondary-color) !important;
 }
 
 .verdict-card.running {
-  border-left-color: var(--accent);
+  border-left-color: var(--bs-primary) !important;
 }
 
-.verdict-card.passed h2,
-.verdict-card.failed h2 {
-  color: inherit;
+.verdict {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+  text-decoration: none;
 }
 
-/* ---------- 卡片与表单 ---------- */
-
-.card {
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  padding: 1rem 1.1rem;
-  margin: 1rem 0;
+.verdict:hover {
+  text-decoration: none;
 }
 
-.field {
-  margin: 0.6rem 0;
+.verdict-head {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
 }
 
-label > span {
-  display: block;
-  font-size: 0.85rem;
-  color: var(--muted);
+.verdict-meta {
+  color: var(--bs-secondary-color);
+  font-size: 0.82rem;
+  margin: 0.5rem 0 0;
+  font-variant-numeric: tabular-nums;
 }
 
-input[type="text"],
-input[type="file"],
-input:not([type]),
-textarea,
-select {
-  width: 100%;
-  padding: 0.4rem 0.5rem;
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  background: var(--bg);
-  color: var(--ink);
-  font: inherit;
-  font-size: 0.9rem;
+/*
+ * verdictClass 的四个类**只用来画左侧色条**（见上面的 .verdict-card.*），不再给整张卡上色。
+ *
+ * 它们以前是通用文字色，落在 `.card.verdict-card.passed` 上会把卡里所有文字一起染绿——
+ * 包括统计数字，于是「成本：未知」也看起来像个好消息。
+ * 判决已经由药丸表达了，整卡染色只是噪音。
+ */
+
+/* =========================================================================
+   4. 统计条
+   ========================================================================= */
+
+/* 用 gap:1px + 背景色画发丝分隔线，比给每格加 border 更干净。 */
+.stat-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(7rem, 1fr));
+  gap: 1px;
+  background: var(--bs-border-color);
+  border: 1px solid var(--bs-border-color);
+  border-radius: var(--bs-border-radius);
+  overflow: hidden;
+  margin: 0.9rem 0;
 }
 
-textarea {
-  resize: vertical;
-  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+.stat {
+  background: var(--bs-body-bg);
+  padding: 0.6rem 0.75rem;
 }
 
-.row {
+.stat-value {
+  font-size: 1.15rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.3;
+}
+
+.stat-label {
+  font-size: 0.72rem;
+  color: var(--bs-secondary-color);
+  margin-top: 0.1rem;
+  letter-spacing: 0.02em;
+}
+
+/* =========================================================================
+   5. 表单排布
+   ========================================================================= */
+
+/* 行编辑器里的一行。**不能叫 .row**——那是 Bootstrap 的栅格类，语义完全不同。 */
+.field-row {
   display: flex;
   gap: 0.4rem;
   align-items: center;
@@ -257,121 +396,261 @@ textarea {
   flex-wrap: wrap;
 }
 
-.row input {
+.field-row input {
   flex: 1 1 10rem;
+  min-width: 0;
 }
 
 .rows {
-  margin: 0.4rem 0;
+  margin: 0.5rem 0;
+}
+
+.text-match {
+  margin: 0.75rem 0;
 }
 
 .actions {
   display: flex;
   gap: 0.5rem;
-  margin-top: 1rem;
+  align-items: center;
   flex-wrap: wrap;
+  margin-top: 1.25rem;
 }
 
-button {
-  padding: 0.35rem 0.8rem;
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  background: var(--panel);
-  color: var(--ink);
-  font: inherit;
-  font-size: 0.9rem;
-  cursor: pointer;
+/* 页头里的操作跟在标题同一行，不该带 .actions 给卡片底部留的那道上边距。 */
+.page-head .actions {
+  margin-top: 0;
 }
 
-button:hover:not(:disabled) {
-  border-color: var(--accent);
+/* 数值字段组：窄屏自动换行，而不是挤成一行五个小格子。 */
+.field-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
+  gap: 0.5rem;
+  margin: 0.5rem 0;
 }
 
-button:disabled {
-  opacity: 0.5;
-  cursor: default;
-}
-
-button.primary {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: #fff;
-}
-
-button.danger {
-  color: var(--bad);
-  border-color: color-mix(in srgb, var(--bad) 40%, var(--line));
-}
-
-button.small {
-  padding: 0.15rem 0.5rem;
-  font-size: 0.82rem;
-}
-
-/* ---------- 提示块 ---------- */
-
-.error,
-.note {
-  border-radius: 6px;
-  padding: 0.6rem 0.8rem;
-  margin: 0.75rem 0;
-  font-size: 0.9rem;
-}
-
-.error {
-  background: color-mix(in srgb, var(--bad) 12%, transparent);
-  border: 1px solid color-mix(in srgb, var(--bad) 45%, transparent);
-}
-
-.note {
-  background: var(--warn-bg);
-  border: 1px solid color-mix(in srgb, var(--skip) 45%, transparent);
-}
-
-.blocking {
-  color: var(--bad);
-  font-weight: 600;
-}
-
-/* 护栏命中是**好结果**（安全网起作用了），但对 CI 而言是必须看见的信号，
-  所以用醒目底色而不是普通正文。 */
-.guardrail {
-  background: color-mix(in srgb, var(--skip) 25%, transparent);
-  border-left: 4px solid var(--skip);
-  padding: 0.5rem 0.7rem;
-  border-radius: 4px;
-}
-
-/* ---------- 事件流 ---------- */
+/* =========================================================================
+   6. 事件时间线
+   ========================================================================= */
 
 .events {
   list-style: none;
-  margin: 0.5rem 0;
-  padding: 0.5rem 0.7rem;
-  max-height: 18rem;
+  margin: 0.5rem 0 0;
+  padding: 0.3rem 0;
+  max-height: 20rem;
   overflow-y: auto;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-  font-size: 0.8rem;
+  background: var(--bs-body-bg);
+  border: 1px solid var(--bs-border-color);
+  border-radius: var(--bs-border-radius);
+  font-family: var(--bs-font-monospace);
+  font-size: 0.78rem;
+  line-height: 1.5;
 }
 
-.events li {
-  padding: 0.1rem 0;
-  border-bottom: 1px dotted var(--line);
+/* 左侧类型色条：一眼扫出哪几行是护栏拦截、哪几行是正常推进。 */
+.events li.ev {
+  padding: 0.16rem 0.7rem 0.16rem 0.6rem;
+  border-left: 2px solid transparent;
+  border-bottom: 1px solid var(--bs-border-color-translucent);
   white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.events li.ev:last-child {
+  border-bottom: none;
+}
+
+/* 事件里的错误块不再套一层 alert——它已经在事件流里了。 */
+.events li.alert {
+  margin: 0;
+  border: none;
+  border-radius: 0;
+  border-left: 2px solid var(--bs-danger);
+  padding: 0.16rem 0.7rem;
+  font-family: var(--bs-font-monospace);
+  font-size: 0.78rem;
 }
 
 .ev-guardrail-blocked {
-  color: var(--bad);
+  border-left-color: var(--bs-danger) !important;
+  color: var(--bs-danger);
   font-weight: 600;
 }
 
 .ev-run-finished {
+  border-left-color: var(--bs-primary) !important;
   font-weight: 600;
 }
 
 .ev-step-skipped {
-  color: var(--skip);
+  color: var(--bs-warning-text-emphasis);
+}
+
+.ev-assertion-evaluated {
+  border-left-color: var(--bs-primary) !important;
+}
+
+.ev-step-executed,
+.ev-step-decided {
+  border-left-color: var(--bs-border-color) !important;
+}
+
+/* 空事件框里的说明文字：它是提示，不是一条事件。 */
+.events-placeholder {
+  color: var(--bs-secondary-color);
+  font-style: italic;
+}
+
+/* =========================================================================
+   7. 画面缩略图（步骤表「画面」列）
+   ========================================================================= */
+
+.frame-link {
+  display: inline-block;
+  line-height: 0;
+  border: 1px solid var(--bs-border-color);
+  border-radius: var(--bs-border-radius-sm);
+  overflow: hidden;
+}
+
+.frame-link img {
+  display: block;
+  width: 5rem;
+  height: auto;
+  transition: transform 0.15s;
+}
+
+.frame-link:hover {
+  border-color: var(--bs-primary);
+}
+
+.frame-link:hover img {
+  transform: scale(1.04);
+}
+
+/* =========================================================================
+   8. 空状态与骨架屏
+   ========================================================================= */
+
+.empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 3rem 1.5rem;
+  text-align: center;
+  border: 1px dashed var(--bs-border-color);
+  border-radius: var(--bs-border-radius-lg);
+  background: var(--bs-body-bg);
+}
+
+.empty-mark {
+  width: 2rem;
+  height: 2rem;
+  color: var(--bs-secondary-color);
+}
+
+.empty h2 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.empty p {
+  margin: 0;
+  max-width: 32rem;
+}
+
+.skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  margin-top: 1.5rem;
+}
+
+.skeleton span {
+  display: block;
+  height: 0.9rem;
+  border-radius: var(--bs-border-radius-sm);
+  background: linear-gradient(
+    90deg,
+    var(--bs-secondary-bg) 25%,
+    var(--bs-tertiary-bg) 37%,
+    var(--bs-secondary-bg) 63%
+  );
+  background-size: 400% 100%;
+  animation: shimmer 1.5s ease-in-out infinite;
+}
+
+.skeleton span:nth-child(1) {
+  width: 30%;
+  height: 1.4rem;
+}
+
+.skeleton span:nth-child(2) {
+  width: 100%;
+}
+
+.skeleton span:nth-child(3) {
+  width: 80%;
+}
+
+/* =========================================================================
+   9. 动效
+   ========================================================================= */
+
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.25;
+  }
+}
+
+@keyframes shimmer {
+  from {
+    background-position: 100% 0;
+  }
+  to {
+    background-position: 0 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+
+  .skeleton span {
+    background: var(--bs-secondary-bg);
+  }
+}
+
+/* =========================================================================
+   10. 窄屏
+   ========================================================================= */
+
+@media (max-width: 640px) {
+  main {
+    padding: 1.25rem 0.9rem 4rem;
+  }
+
+  .topbar {
+    gap: 0.75rem;
+    padding: 0 0.9rem;
+  }
+
+  .brand-name {
+    display: none;
+  }
+
+  .stat-row {
+    grid-template-columns: repeat(2, 1fr);
+  }
 }

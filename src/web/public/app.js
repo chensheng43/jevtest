@@ -69,7 +69,7 @@ async function call(path, options = {}) {
 
 /** 把错误渲染成一块红字，并把 zod 的 issue 路径列出来（方便定位到字段）。 */
 function errorBox(error) {
-  const box = el("div", { class: "error" }, [el("strong", { text: "出错了：" }), error.message]);
+  const box = el("div", { class: "alert alert-danger" }, [el("strong", { text: "出错了：" }), error.message]);
   if (Array.isArray(error.detail)) {
     const list = el("ul");
     for (const issue of error.detail) {
@@ -96,46 +96,175 @@ function engineCapability(name) {
 }
 
 // ---------------------------------------------------------------------------
+// 展示组件
+// ---------------------------------------------------------------------------
+
+/**
+ * 提示段落。把文案里的 `**强调**` 渲染成真的 <strong>。
+ *
+ * 这些文案全是本文件里的静态字符串，但拼装仍然走 createTextNode——
+ * 「不用 innerHTML」这条底线不因为「内容是我写的」而放松。
+ */
+function hint(text, extraClass = "") {
+  const node = el("p", { class: extraClass === "" ? "hint" : `hint ${extraClass}` });
+  text.split("**").forEach((part, index) => {
+    if (part === "") return;
+    node.append(index % 2 === 1 ? el("strong", { text: part }) : document.createTextNode(part));
+  });
+  return node;
+}
+
+/**
+ * 状态药丸。`tone` 决定配色档位，`mark` 是字形。
+ *
+ * D9：`skipped` 走虚框 + 小字号（见 style.css），刻意比 passed/failed 轻。
+ * D8：`undecided`（passed === null）是**第三种**东西——既不是通过也不是失败，
+ * 也不该被读成「跳过」，所以它有自己的中性灰，不借用任何一方的颜色。
+ */
+function badge(tone, mark, label) {
+  const node = el("span", { class: `badge badge--${tone}` });
+  if (mark !== "") node.append(el("span", { class: "glyph", text: mark }));
+  node.append(el("span", { text: label }));
+  return node;
+}
+
+/**
+ * 只表达 passed 的药丸，不掺 status。
+ *
+ * `passed === null`（未判定）必须走自己的中性灰：借用琥珀色会被读成「跳过」，
+ * 借用红色会被读成「失败」——两者都是把没发生的结论画在界面上。
+ */
+function passedBadge(passed) {
+  if (passed === true) return badge("passed", "✓", "通过");
+  if (passed === false) return badge("failed", "✕", "失败");
+  return badge("undecided", "?", "未判定");
+}
+
+/** 判决药丸。全站唯一决定「一次运行该怎么显示」的地方。 */
+function verdictBadge(status, passed) {
+  if (status === "running" || status === "queued") return badge("running", "●", statusLabel(status));
+  return passedBadge(passed);
+}
+
+/** 内联 SVG 图标。`d` 是本文件里的静态常量，不含用户数据，因此不碰 innerHTML。 */
+function svg(d, size = 20, className = "") {
+  const NS = "http://www.w3.org/2000/svg";
+  const node = document.createElementNS(NS, "svg");
+  node.setAttribute("viewBox", "0 0 24 24");
+  node.setAttribute("width", String(size));
+  node.setAttribute("height", String(size));
+  node.setAttribute("fill", "none");
+  node.setAttribute("stroke", "currentColor");
+  node.setAttribute("stroke-width", "1.6");
+  node.setAttribute("stroke-linecap", "round");
+  node.setAttribute("stroke-linejoin", "round");
+  node.setAttribute("aria-hidden", "true");
+  if (className !== "") node.setAttribute("class", className);
+  const shape = document.createElementNS(NS, "path");
+  shape.setAttribute("d", d);
+  node.append(shape);
+  return node;
+}
+
+const ICON_CASES = "M4 5h16v14H4zM8 9h8M8 13h8M8 17h4";
+const ICON_RUNS = "M4 6h16v14H4zM8 3v4M16 3v4M4 11h16";
+
+/** 空状态：图标 + 标题 + 说明（+ 可选动作）。空列表不该只是一行灰字。 */
+function emptyState({ icon, title, children = [] }) {
+  return el("div", { class: "empty" }, [
+    svg(icon, 32, "empty-mark"),
+    el("h2", { text: title }),
+    ...[].concat(children).filter(Boolean),
+  ]);
+}
+
+/** 页头：标题在左，操作在右。`title` 可以是一个现成的节点（标题里要混等宽 id 时）。 */
+function pageHead(title, actions = []) {
+  return el("div", { class: "page-head" }, [
+    typeof title === "string" ? el("h1", { text: title }) : title,
+    actions.length === 0 ? null : el("div", { class: "actions" }, actions),
+  ]);
+}
+
+/** 统计条。数据已经在报告里了，之前只是没显示出来。 */
+function statRow(items) {
+  return el("div", { class: "stat-row" },
+    items.map(([value, label]) =>
+      el("div", { class: "stat" }, [
+        el("div", { class: "stat-value", text: value }),
+        el("div", { class: "stat-label", text: label }),
+      ]),
+    ),
+  );
+}
+
+// ---------------------------------------------------------------------------
 // 视图：用例列表
 // ---------------------------------------------------------------------------
 
 async function viewCases(app) {
   const cases = await call("/api/cases");
+  const importButton = el("button", {
+    class: "btn btn-primary",
+    text: "导入用例",
+    onclick: () => {
+      location.hash = "#/new";
+    },
+  });
+
+  if (cases.length === 0) {
+    app.replaceChildren(
+      pageHead("用例", [importButton]),
+      emptyState({
+        icon: ICON_CASES,
+        title: "还没有用例",
+        children: [
+          hint("可以用「导入用例」粘贴一个 case.yaml，或从命令行导入："),
+          el("p", {}, [el("code", { text: "npm run dev -- import examples/wikipedia-search.yaml" })]),
+        ],
+      }),
+    );
+    return;
+  }
+
+  // 错误提示插在页头与表格之间——原来 prepend 到 #app 会跑到标题上面去。
+  const notices = el("div");
+
   app.replaceChildren(
-    el("h1", { text: "用例" }),
-    cases.length === 0
-      ? el("p", { class: "hint", text: "还没有用例。可以用「新建用例」，或从文件导入：" },
-          [el("code", { text: "npm run dev -- import examples/wikipedia-search.yaml" })])
-      : el("table", { class: "grid" }, [
-          el("thead", {}, [
-            el("tr", {}, [
-              el("th", { text: "id" }),
-              el("th", { text: "标题" }),
-              el("th", { text: "版本" }),
-              el("th", { text: "最近一次运行" }),
-              el("th", { text: "操作" }),
-            ]),
+    pageHead("用例", [importButton]),
+    notices,
+    el("div", { class: "table-responsive" }, [
+      el("table", { class: "table table-sm table-hover align-middle" }, [
+        el("thead", {}, [
+          el("tr", {}, [
+            el("th", { text: "id" }),
+            el("th", { text: "标题" }),
+            el("th", { text: "版本" }),
+            el("th", { text: "最近一次运行" }),
+            el("th", { text: "操作" }),
           ]),
-          el("tbody", {}, cases.map(caseRow)),
         ]),
+        el("tbody", {}, cases.map(caseRow)),
+      ]),
+    ]),
   );
 
   function caseRow(item) {
     const runCell = item.lastRun
-      ? el("a", {
-          href: `#/run/${item.lastRun.runId}`,
-          text: `${statusLabel(item.lastRun.status)}・${passedLabel(item.lastRun.passed)}`,
-          class: `verdict ${verdictClass(item.lastRun.status, item.lastRun.passed)}`,
-        })
+      ? el("a", { href: `#/run/${item.lastRun.runId}`, class: "verdict" }, [
+          verdictBadge(item.lastRun.status, item.lastRun.passed),
+          el("span", { class: "hint", text: statusLabel(item.lastRun.status) }),
+        ])
       : el("span", { class: "hint", text: "从未运行" });
 
     return el("tr", {}, [
-      el("td", {}, [el("a", { href: `#/case/${item.id}`, text: item.id })]),
+      el("td", { class: "mono" }, [el("a", { href: `#/case/${item.id}`, text: item.id })]),
       el("td", { text: item.title }),
-      el("td", { text: `r${item.revision}` }),
+      el("td", { class: "mono", text: `r${item.revision}` }),
       el("td", {}, [runCell]),
       el("td", {}, [
         el("button", {
+          class: "btn btn-sm btn-outline-primary",
           text: "运行",
           onclick: async (event) => {
             event.target.disabled = true;
@@ -143,13 +272,13 @@ async function viewCases(app) {
               const { runIds } = await call("/api/runs", { method: "POST", body: { caseIds: [item.id] } });
               location.hash = `#/run/${runIds[0]}`;
             } catch (error) {
-              app.prepend(errorBox(error));
+              notices.replaceChildren(errorBox(error));
               event.target.disabled = false;
             }
           },
         }),
         el("button", {
-          class: "danger",
+          class: "btn btn-sm btn-outline-danger",
           text: "删除",
           onclick: async () => {
             if (!confirm(`删除用例 ${item.id}？该操作不做撤销。`)) return;
@@ -157,7 +286,7 @@ async function viewCases(app) {
               await call(`/api/cases/${item.id}`, { method: "DELETE" });
               await viewCases(app);
             } catch (error) {
-              app.prepend(errorBox(error));
+              notices.replaceChildren(errorBox(error));
             }
           },
         }),
@@ -208,10 +337,13 @@ async function viewCaseEditor(app, caseId) {
   }
 
   const container = el("div");
+  // 注意 replaceChildren 会把 null 变成字符串 "null"，所以先过滤。
   app.replaceChildren(
-    el("h1", { text: caseId === null ? "新建用例" : `编辑 ${caseId}` }),
-    caseId === null ? el("p") : el("p", { class: "hint", text: `当前版本 r${revision}` }),
-    container,
+    ...[
+      pageHead(caseId === null ? "新建用例" : `编辑 ${caseId}`),
+      caseId === null ? null : hint(`当前版本 r${revision}`),
+      container,
+    ].filter(Boolean),
   );
 
   /** 引擎下拉与它的能力提示。两者在表单重建后要重新绑定，所以放在这一层持有。 */
@@ -227,7 +359,7 @@ async function viewCaseEditor(app, caseId) {
     engineInput?.addEventListener("change", updateEngineNotice);
     const actions = el("div", { class: "actions" }, [
       el("button", {
-        class: "primary",
+        class: "btn btn-primary",
         text: caseId === null ? "创建" : "保存",
         onclick: async () => {
           try {
@@ -241,6 +373,7 @@ async function viewCaseEditor(app, caseId) {
         },
       }),
       el("button", {
+        class: "btn btn-outline-secondary",
         text: "检测页面",
         title: "只读地打开一次目标页面，检查本平台能不能测它。不调用模型。",
         onclick: async (event) => {
@@ -259,6 +392,7 @@ async function viewCaseEditor(app, caseId) {
     if (caseId !== null) {
       actions.append(
         el("button", {
+          class: "btn btn-outline-secondary",
           text: "导出 YAML",
           onclick: async () => {
             const yaml = await call(`/api/cases/${caseId}/export`);
@@ -299,7 +433,7 @@ async function viewCaseEditor(app, caseId) {
           ["maxCostUsd", "maxCostUsd（空=不限）", value.budget.maxCostUsd],
           ["maxElapsedMs", "maxElapsedMs", value.budget.maxElapsedMs],
         ]),
-        el("p", { class: "hint", text: "任一维度超限即终止，status 为 budget_exceeded，且**已产生的轨迹会保留**供断言求值。" }),
+        hint("任一维度超限即终止，status 为 budget_exceeded，且**已产生的轨迹会保留**供断言求值。"),
       ]),
     );
 
@@ -312,11 +446,19 @@ async function viewCaseEditor(app, caseId) {
           ["role", "role"],
           ["reason", "reason（必填）"],
         ]),
-        labelWrap(
-          el("input", { type: "checkbox", name: "allowDefaultOverride", checked: value.allowDefaultOverride }),
-          "allowDefaultOverride（允许移除内置护栏，报告会打红色横幅）",
-        ),
-        el("p", { class: "hint", text: "内置集覆盖删除/支付/下单/密码框等，**只增不减**。命中时浏览器不会收到任何输入。" }),
+        el("div", { class: "form-check" }, [
+          el("input", {
+            class: "form-check-input",
+            type: "checkbox",
+            name: "allowDefaultOverride",
+            checked: value.allowDefaultOverride,
+          }),
+          el("label", {
+            class: "form-check-label",
+            text: "allowDefaultOverride（允许移除内置护栏，报告会打红色横幅）",
+          }),
+        ]),
+        hint("内置集覆盖删除/支付/下单/密码框等，**只增不减**。命中时浏览器不会收到任何输入。"),
       ]),
     );
 
@@ -382,7 +524,7 @@ async function viewCaseEditor(app, caseId) {
    * 因此这里**只生成提示元素**，事件绑定放在 `renderForm` 里统一做。
    */
   function probabilityNotice() {
-    return el("p", { class: "hint engine-notice", text: engineNoticeText(draft.engine) });
+    return hint(engineNoticeText(draft.engine), "engine-notice");
   }
 
   function updateEngineNotice() {
@@ -413,14 +555,17 @@ const actionMatchColumns = [
 ];
 
 /** 一个可增删的行编辑器。行的增删改都直接写回草稿，避免重渲染时丢用户输入。 */
-function rowsEditor(name, rows, columns, hint) {
+function rowsEditor(name, rows, columns, hintText) {
   const wrap = el("div", { class: "rows", "data-rows": name });
   const render = () => {
+    // replaceChildren 会把 null 变成字符串 "null"——没有 hint 的行编辑器
+    // 因此会凭空多出一个 "null" 文本节点。先过滤再展开。
     wrap.replaceChildren(
-      ...rows.map((row, index) => {
-        const line = el("div", { class: "row" });
+      ...[...rows.map((row, index) => {
+        const line = el("div", { class: "field-row" });
         for (const [key, label] of columns) {
           const input = el("input", {
+            class: "form-control form-control-sm",
             placeholder: label,
             value: row[key] ?? "",
             oninput: (event) => {
@@ -432,7 +577,7 @@ function rowsEditor(name, rows, columns, hint) {
         line.append(
           el("button", {
             type: "button",
-            class: "danger small",
+            class: "btn btn-sm btn-outline-danger",
             text: "×",
             onclick: () => {
               rows.splice(index, 1);
@@ -444,14 +589,15 @@ function rowsEditor(name, rows, columns, hint) {
       }),
       el("button", {
         type: "button",
-        class: "small",
+        class: "btn btn-sm btn-outline-secondary",
         text: `+ 增一行 ${name}`,
         onclick: () => {
           rows.push({});
           render();
         },
       }),
-      hint ? el("p", { class: "hint", text: hint }) : null,
+      hintText ? hint(hintText) : null,
+      ].filter(Boolean),
     );
   };
   render();
@@ -462,51 +608,65 @@ function textMatchEditor(name, label, match) {
   const value = match ?? {};
   return el("div", { class: "text-match" }, [
     el("h4", { text: label }),
-    el("div", { class: "row" }, [
-      el("input", { name: `${name}.equals`, placeholder: "equals", value: value.equals ?? "" }),
-      el("input", { name: `${name}.contains`, placeholder: "contains（每行一条）", value: (value.contains ?? []).join("\n") }),
-      el("input", { name: `${name}.notContains`, placeholder: "notContains（每行一条）", value: (value.notContains ?? []).join("\n") }),
-      el("input", { name: `${name}.matches`, placeholder: "matches 正则（每行一条）", value: (value.matches ?? []).join("\n") }),
+    el("div", { class: "field-row" }, [
+      el("input", { class: "form-control form-control-sm", name: `${name}.equals`, placeholder: "equals", value: value.equals ?? "" }),
+      el("input", { class: "form-control form-control-sm", name: `${name}.contains`, placeholder: "contains（每行一条）", value: (value.contains ?? []).join("\n") }),
+      el("input", { class: "form-control form-control-sm", name: `${name}.notContains`, placeholder: "notContains（每行一条）", value: (value.notContains ?? []).join("\n") }),
+      el("input", { class: "form-control form-control-sm", name: `${name}.matches`, placeholder: "matches 正则（每行一条）", value: (value.matches ?? []).join("\n") }),
     ]),
   ]);
 }
 
 function rowFields(name, fields) {
-  return el("div", { class: "row" },
+  return el("div", { class: "field-grid" },
     fields.map(([key, label, value]) =>
-      el("input", { name: `${name}.${key}`, placeholder: label, value: value ?? "" }),
+      el("input", { class: "form-control form-control-sm", name: `${name}.${key}`, placeholder: label, value: value ?? "" }),
     ),
   );
 }
 
 function section(title, children) {
-  return el("section", { class: "card" }, [el("h2", { text: title }), ...[].concat(children).filter(Boolean)]);
-}
-
-function field(name, label, input, hint) {
-  input.setAttribute("name", name);
-  return el("div", { class: "field" }, [
-    labelWrap(input, label),
-    hint ? el("p", { class: "hint", text: hint }) : null,
+  return el("section", { class: "card mb-3" }, [
+    el("div", { class: "card-header fw-semibold", text: title }),
+    // el() 只有三个参数，children 必须是**一个数组**——不能 spread 进去。
+    el("div", { class: "card-body" }, [].concat(children).filter(Boolean)),
   ]);
 }
 
+// 参数名用 hintText 而不是 hint：后者是本文件里的展示组件函数，会被参数遮蔽。
+function field(name, label, input, hintText) {
+  input.setAttribute("name", name);
+  return el("div", { class: "mb-3" }, [
+    labelWrap(input, label),
+    hintText ? hint(hintText) : null,
+  ]);
+}
+
+/**
+ * 标签与控件。控件**嵌在 label 里**（点标签即聚焦，也是更好的可访问性），
+ * 所以 label 必须显式 d-block：Bootstrap 的 reboot 把 label 设成了
+ * `display: inline-block`，那样它会缩到内容宽度，里面 `width: 100%` 的
+ * 输入框就只能拿到两百来像素。
+ */
 function labelWrap(input, text) {
-  return el("label", {}, [el("span", { text }), input]);
+  return el("label", { class: "d-block" }, [
+    el("span", { class: "form-label", text }),
+    input,
+  ]);
 }
 
 function textInput(name, value) {
-  return el("input", { type: "text", name, value: value ?? "" });
+  return el("input", { type: "text", class: "form-control", name, value: value ?? "" });
 }
 
 function textarea(name, value) {
-  const node = el("textarea", { name, rows: 3 });
+  const node = el("textarea", { class: "form-control font-monospace", name, rows: 3 });
   node.value = value ?? "";
   return node;
 }
 
 function select(name, options, value) {
-  const node = el("select", { name });
+  const node = el("select", { class: "form-select", name });
   for (const option of options) {
     const item = el("option", { value: option, text: option || "(默认)" });
     if (option === (value ?? "")) item.selected = true;
@@ -655,9 +815,9 @@ function normalizeDraft(def) {
 }
 
 function admissionBox(report) {
-  const box = el("div", { class: report.ok ? "note" : "error" }, [
+  const box = el("div", { class: report.ok ? "alert alert-warning" : "alert alert-danger" }, [
     el("strong", { text: report.ok ? "准入检查：可以测（有警告）" : "准入检查：不建议跑" }),
-    el("p", { class: "hint", text: "准入是记录与警告，不是运行的闸——blocking 项不阻止运行。" }),
+    hint("准入是记录与警告，不是运行的闸——blocking 项不阻止运行。"),
   ]);
   for (const line of report.blocking) box.append(el("p", { class: "blocking", text: `阻断：${line}` }));
   for (const line of report.warnings) box.append(el("p", { text: `警告：${line}` }));
@@ -677,36 +837,51 @@ function admissionBox(report) {
 
 async function viewRuns(app) {
   const runs = await call("/api/runs");
+
+  if (runs.length === 0) {
+    app.replaceChildren(
+      pageHead("运行历史"),
+      emptyState({
+        icon: ICON_RUNS,
+        title: "还没有运行记录",
+        children: [hint("去「用例」页点一次「运行」，结果就会出现在这里。")],
+      }),
+    );
+    return;
+  }
+
   app.replaceChildren(
-    el("h1", { text: "运行历史" }),
-    runs.length === 0
-      ? el("p", { class: "hint", text: "还没有运行记录。" })
-      : el("table", { class: "grid" }, [
-          el("thead", {}, [
-            el("tr", {}, [
-              el("th", { text: "开始时间" }),
-              el("th", { text: "用例" }),
-              el("th", { text: "status" }),
-              el("th", { text: "passed" }),
-              el("th", { text: "步数" }),
-              el("th", { text: "耗时" }),
-              el("th", { text: "成本" }),
-            ]),
+    pageHead("运行历史"),
+    el("div", { class: "table-responsive" }, [
+      el("table", { class: "table table-sm table-hover align-middle" }, [
+        el("thead", {}, [
+          el("tr", {}, [
+            el("th", { text: "开始时间" }),
+            el("th", { text: "用例" }),
+            el("th", { text: "status" }),
+            el("th", { text: "passed" }),
+            el("th", { text: "步数" }),
+            el("th", { text: "耗时" }),
+            el("th", { text: "成本" }),
           ]),
-          el("tbody", {},
-            runs.map((run) =>
-              el("tr", {}, [
-                el("td", {}, [el("a", { href: `#/run/${run.runId}`, text: new Date(run.startedAt).toLocaleString() })]),
-                el("td", { text: run.caseTitle || run.caseId }),
-                el("td", { text: statusLabel(run.status) }),
-                el("td", { class: verdictClass(run.status, run.passed), text: passedLabel(run.passed) }),
-                el("td", { text: String(run.steps) }),
-                el("td", { text: `${Math.round(run.elapsedMs / 1000)}s` }),
-                el("td", { text: run.costUsd === null ? "未知" : `$${run.costUsd.toFixed(4)}` }),
-              ]),
-            ),
-          ),
         ]),
+        el("tbody", {},
+          runs.map((run) =>
+            el("tr", {}, [
+              el("td", { class: "mono" }, [
+                el("a", { href: `#/run/${run.runId}`, text: new Date(run.startedAt).toLocaleString() }),
+              ]),
+              el("td", { text: run.caseTitle || run.caseId }),
+              el("td", {}, [badge("status", "", statusLabel(run.status))]),
+              el("td", {}, [verdictBadge(run.status, run.passed)]),
+              el("td", { class: "mono", text: String(run.steps) }),
+              el("td", { class: "mono", text: `${Math.round(run.elapsedMs / 1000)}s` }),
+              el("td", { class: "mono", text: run.costUsd === null ? "未知" : `$${run.costUsd.toFixed(4)}` }),
+            ]),
+          ),
+        ),
+      ]),
+    ]),
   );
 }
 
@@ -727,27 +902,32 @@ async function viewRun(app, runId) {
     banner,
     el("div", { class: "live" }, [
       el("h2", { text: "实时进度" }),
-      el("p", { class: "hint", text: "每 500ms 按 seq 增量拉取；刷新页面会从 0 重新回放，因此不会丢历史。" }),
+      hint("每 500ms 按 seq 增量拉取；刷新页面会从 0 重新回放，因此不会丢历史。"),
       eventList,
       el("h2", { text: "轨迹" }),
-      el("table", { class: "grid" }, [
-        el("thead", {}, [
-          el("tr", {}, [
-            el("th", { text: "#" }),
-            el("th", { text: "动作" }),
-            el("th", { text: "operation" }),
-            el("th", { text: "概率" }),
-            el("th", { text: "执行" }),
-            el("th", { text: "页面变化" }),
-            el("th", { text: "耗时" }),
-            el("th", { text: "画面" }),
+      el("div", { class: "table-responsive" }, [
+        el("table", { class: "table table-sm table-hover align-middle" }, [
+          el("thead", {}, [
+            el("tr", {}, [
+              el("th", { text: "#" }),
+              el("th", { text: "动作" }),
+              el("th", { text: "operation" }),
+              el("th", { text: "概率" }),
+              el("th", { text: "执行" }),
+              el("th", { text: "页面变化" }),
+              el("th", { text: "耗时" }),
+              el("th", { text: "画面" }),
+            ]),
           ]),
+          stepTable,
         ]),
-        stepTable,
       ]),
     ]),
   ]);
-  app.replaceChildren(el("h1", { text: `运行 ${runId}` }), container);
+  app.replaceChildren(
+    pageHead(el("h1", {}, [document.createTextNode("运行 "), el("span", { class: "mono", text: runId })])),
+    container,
+  );
 
   const poll = async () => {
     try {
@@ -762,32 +942,68 @@ async function viewRun(app, runId) {
         stepTable.replaceChildren(...report.steps.map((step) => stepRow(step, report.runId)));
         renderAssertions(banner, report);
       }
+      refreshEventPlaceholder(eventList, report);
       if (report === null || report.status === "queued" || report.status === "running") {
         pollTimer = setTimeout(poll, POLL_MS);
       }
     } catch (error) {
       pollTimer = setTimeout(poll, POLL_MS * 4);
-      eventList.append(el("li", { class: "error", text: `拉取失败：${error.message}` }));
+      eventList.append(el("li", { class: "alert alert-danger", text: `拉取失败：${error.message}` }));
     }
   };
   await poll();
 }
 
-function reportHeader(report) {
-  const wrap = el("div", { class: `card verdict-card ${verdictClass(report.status, report.passed)}` });
-  wrap.append(
-    el("h2", { text: `${statusLabel(report.status)}｜断言：${passedLabel(report.passed)}` }),
-    el("p", { class: "hint", text: "status 描述循环如何结束，passed 是断言判决。两者相互独立——done + failed 是正常组合。" }),
-    el("p", {
-      text: `引擎 ${report.engine}・用例 ${report.caseId}@r${report.caseRevision}・${report.steps.length} 步・`
-        + `${report.stats.modelCalls} 次请求 / ${report.stats.decisions} 次决策・`
-        + `${Math.round(report.elapsedMs / 1000)}s・`
-        + `成本 ${report.stats.costUsd === null ? "未知（引擎未报金额）" : `$${report.stats.costUsd.toFixed(4)}`}`,
+/**
+ * 空事件框的说明。
+ *
+ * 事件日志是**进程内**的环形缓冲（见 web/events.ts），服务一重启，
+ * 旧运行的事件就没了——翻一条历史记录时就会看到一个空框。
+ * 说清楚为什么是空的，比让人以为界面坏了强。
+ */
+function refreshEventPlaceholder(list, report) {
+  list.querySelector("li.events-placeholder")?.remove();
+  if (list.children.length > 0) return;
+  const live = report !== null && (report.status === "queued" || report.status === "running");
+  list.append(
+    el("li", {
+      class: "ev events-placeholder",
+      text: live
+        ? "等待事件……"
+        : "这次运行的事件已不在缓冲区（事件日志是进程内的，服务重启后清空）。轨迹与断言见下方。",
     }),
   );
-  if (report.failureReason) wrap.append(el("p", { class: "blocking", text: report.failureReason }));
+}
+
+function reportHeader(report) {
+  const stats = report.stats;
+  const wrap = el("div", { class: `card verdict-card ${verdictClass(report.status, report.passed)}` });
+  const body = el("div", { class: "card-body" }, [
+    el("div", { class: "verdict-head" }, [
+      verdictBadge(report.status, report.passed),
+      el("h2", { class: "h5 mb-0", text: statusLabel(report.status) }),
+    ]),
+    hint("status 描述循环如何结束，passed 是断言判决。两者相互独立——done + failed 是正常组合。"),
+  ]);
+  body.append(
+    statRow([
+      [String(report.steps.length), "步数"],
+      [String(stats.decisions), "决策"],
+      [String(stats.modelCalls), "模型请求"],
+      [`${stats.inputTokens} / ${stats.outputTokens}`, "tokens 入/出"],
+      [`${Math.round(report.elapsedMs / 1000)}s`, "耗时"],
+      [stats.costUsd === null ? "未知" : `$${stats.costUsd.toFixed(4)}`, "成本"],
+    ]),
+    el("p", {
+      class: "verdict-meta",
+      text: `引擎 ${report.engine}・用例 ${report.caseId}@r${report.caseRevision}`
+        + `・决策引擎往返 ${Math.round(stats.engineLatencyMs / 1000)}s`
+        + (stats.costUsd === null ? "・引擎未报金额" : ""),
+    }),
+  );
+  if (report.failureReason) body.append(el("p", { class: "blocking", text: report.failureReason }));
   if (report.artifacts.traceZip) {
-    wrap.append(
+    body.append(
       el("p", {}, [
         el("a", { href: `/api/runs/${report.runId}/trace.zip`, text: "下载 trace.zip" }),
         el("span", { class: "hint", text: "（npx playwright show-trace 打开：时间轴 + 每步 DOM 快照）" }),
@@ -795,13 +1011,16 @@ function reportHeader(report) {
     );
   }
   for (const hit of report.guardrailHits) {
-    wrap.append(el("p", { class: "blocking", text: `护栏命中（第 ${hit.step} 步，${hit.action}）：${hit.reason}` }));
+    body.append(el("p", { class: "blocking", text: `护栏命中（第 ${hit.step} 步，${hit.action}）：${hit.reason}` }));
   }
   if (report.admission && !report.admission.ok) {
-    const box = el("div", { class: "note" }, [el("strong", { text: "准入检查有阻断项（不阻止运行）" })]);
-    for (const line of report.admission.blocking) box.append(el("p", { text: line }));
-    wrap.append(box);
+    const box = el("div", { class: "alert alert-warning" }, [
+      el("strong", { text: "准入检查有阻断项（不阻止运行）" }),
+    ]);
+    for (const line of report.admission.blocking) box.append(el("p", { class: "mb-0", text: line }));
+    body.append(box);
   }
+  wrap.append(body);
   return wrap;
 }
 
@@ -813,55 +1032,91 @@ function reportHeader(report) {
  */
 function renderAssertions(container, report) {
   if (report.assertion === null) {
-    container.append(el("p", { class: "hint", text: "断言层未运行（例如预算在第一步之前就耗尽）——这与「失败」是两回事。" }));
+    container.append(hint("断言层未运行（例如预算在第一步之前就耗尽）——这与「失败」是两回事。"));
     return;
   }
   const checks = Object.entries(report.assertion.checks);
   if (checks.length === 0) {
-    container.append(el("p", { class: "hint", text: "用例没有声明任何断言，因此 passed 为未判定。" }));
+    container.append(hint("用例没有声明任何断言，因此 passed 为未判定。"));
     return;
   }
-  const table = el("table", { class: "grid" }, [
-    el("thead", {}, [el("tr", {}, [el("th", { text: "检查项" }), el("th", { text: "结果" }), el("th", { text: "实际值" })])]),
-    el("tbody", {},
-      checks.map(([path, check]) =>
-        el("tr", {}, [
-          el("td", { class: "path", text: path }),
-          el("td", {
-            class: check.skipped ? "skipped" : check.passed ? "passed" : "failed",
-            text: check.skipped ? "跳过" : check.passed ? "通过" : "失败",
-          }),
-          el("td", { text: check.detail }),
+  container.append(
+    // 断言是判决的**证据**，所以它自成一张卡，而不是挂在判决卡末尾——
+    // 那样标题会正好压在卡的下边框上。
+    el("section", { class: "card mb-3" }, [
+      el("div", { class: "card-header d-flex justify-content-between align-items-center" }, [
+        el("span", { class: "fw-semibold", text: "断言" }),
+        passedBadge(report.assertion.passed),
+      ]),
+      el("div", { class: "card-body" }, [
+        el("div", { class: "table-responsive" }, [
+          el("table", { class: "table table-sm table-hover align-middle" }, [
+            el("thead", {}, [el("tr", {}, [el("th", { text: "检查项" }), el("th", { text: "结果" }), el("th", { text: "实际值" })])]),
+            el("tbody", {},
+              checks.map(([path, check]) =>
+                el("tr", {}, [
+                  el("td", { class: "path", text: path }),
+                  // 这里的三态顺序不能改：skipped 必须先判，否则「跳过」会掉进 passed 分支。
+                  el("td", {}, [
+                    check.skipped
+                      ? badge("skipped", "⊘", "跳过")
+                      : check.passed
+                        ? badge("passed", "✓", "通过")
+                        : badge("failed", "✕", "失败"),
+                  ]),
+                  el("td", { text: check.detail }),
+                ]),
+              ),
+            ),
+          ]),
         ]),
-      ),
-    ),
-  ]);
-  container.append(el("h2", { text: `断言（${report.assertion.passed === null ? "未判定" : report.assertion.passed ? "通过" : "失败"}）` }), table);
+      ]),
+    ]),
+  );
 }
 
 function stepRow(step, runId) {
+  const frameUrl = `/api/runs/${runId}/frames/${step.frame}.jpg`;
   return el("tr", {}, [
-    el("td", { text: String(step.step) }),
+    el("td", { class: "mono", text: String(step.step) }),
     el("td", { text: step.action + (step.text ? ` → "${step.text}"` : "") }),
-    el("td", { text: step.operation }),
+    el("td", { class: "mono", text: step.operation }),
     el("td", {
+      class: "mono",
       text: `${step.probability.toFixed(2)}${step.distribution === "degenerate" ? "（合成）" : ""}`,
     }),
-    el("td", {
-      class: step.executed ? "" : "failed",
+    el("td", {}, [
       // executed=false 是**好结果**：护栏在浏览器收到任何输入之前拦下了它。
-      text: step.executed ? "已执行" : `被拦下：${step.blockReason ?? "未知原因"}`,
-    }),
-    el("td", {
+      // 但仍然用醒目色——对 CI 来说它是必须被看见的信号，不是可以忽略的噪音。
+      el("div", { class: "stack" }, step.executed
+        ? [badge("status", "", "已执行")]
+        : [
+            badge("failed", "⊘", "被拦下"),
+            el("span", { class: "hint", text: step.blockReason ?? "未知原因" }),
+          ]),
+    ]),
+    el("td", {}, [
       // pageChanged 为 null 不是「没变化」，而是「没能观测」（例如导航打断）。
-      text: step.pageChanged === null ? "未观测" : step.pageChanged ? "有" : "无",
-    }),
-    el("td", { text: `${step.engineLatencyMs + step.textLatencyMs}ms` }),
+      // 用中性药丸而不是普通文字，免得被读成「无」。
+      step.pageChanged === null
+        ? badge("undecided", "", "未观测")
+        : el("span", { text: step.pageChanged ? "有" : "无" }),
+    ]),
+    // 两个延迟都是浮点毫秒，直接相加会渲染出 1534.9316999999999ms 这种东西。
+    el("td", { class: "mono", text: `${Math.round(step.engineLatencyMs + step.textLatencyMs)}ms` }),
     // 事件里刻意不带截图 base64，画面按 `frame` 序号另外请求（见 web/api.ts §8.4）。
+    // frames/ 默认关闭，所以 frame 为 null 是常态，不是异常。
     el("td", {}, [
       step.frame === null
         ? el("span", { class: "hint", text: "—" })
-        : el("a", { href: `/api/runs/${runId}/frames/${step.frame}.jpg`, target: "_blank", text: `帧 ${step.frame}` }),
+        : el("a", {
+            class: "frame-link",
+            href: frameUrl,
+            target: "_blank",
+            title: `帧 ${step.frame}（点击看原图）`,
+          }, [
+            el("img", { src: frameUrl, alt: `第 ${step.step} 步截图`, loading: "lazy" }),
+          ]),
     ]),
   ]);
 }
@@ -894,9 +1149,19 @@ function appendEvent(list, event) {
 // ---------------------------------------------------------------------------
 
 function viewNew(app) {
-  const textareaNode = el("textarea", { rows: 14, placeholder: "把 case.yaml 的内容粘在这里" });
-  const nameInput = el("input", { type: "text", placeholder: "选择文件…", readonly: true });
+  const textareaNode = el("textarea", {
+    class: "form-control font-monospace",
+    rows: 14,
+    placeholder: "把 case.yaml 的内容粘在这里",
+  });
+  const nameInput = el("input", {
+    class: "form-control",
+    type: "text",
+    placeholder: "选择文件…",
+    readonly: true,
+  });
   const fileInput = el("input", {
+    class: "form-control",
     type: "file",
     accept: ".yaml,.yml",
     onchange: async (event) => {
@@ -907,36 +1172,39 @@ function viewNew(app) {
     },
   });
   const form = el("div", { class: "card" }, [
-    el("h1", { text: "导入用例" }),
-    el("p", { class: "hint", text: "id 冲突时**追加 -2 而不是覆盖**既有用例——导入是「加一个」，静默覆盖属于数据丢失。" }),
-    fileInput,
-    nameInput,
-    textareaNode,
-    el("div", { class: "actions" }, [
-      el("button", {
-        class: "primary",
-        text: "导入",
-        onclick: async (event) => {
-          event.target.disabled = true;
-          try {
-            const revision = await call("/api/cases/import", { method: "POST", body: { yaml: textareaNode.value } });
-            location.hash = `#/case/${revision.caseId}`;
-          } catch (error) {
-            form.prepend(errorBox(error));
-          } finally {
-            event.target.disabled = false;
-          }
-        },
-      }),
-      el("button", {
-        text: "改为手工填写",
-        onclick: () => {
-          location.hash = "#/case-new-form";
-        },
-      }),
+    el("div", { class: "card-header fw-semibold", text: "导入 case.yaml" }),
+    el("div", { class: "card-body" }, [
+      hint("id 冲突时**追加 -2 而不是覆盖**既有用例——导入是「加一个」，静默覆盖属于数据丢失。"),
+      el("div", { class: "mb-3" }, [labelWrap(fileInput, "选择文件")]),
+      el("div", { class: "mb-3" }, [labelWrap(nameInput, "文件名")]),
+      el("div", { class: "mb-3" }, [labelWrap(textareaNode, "内容")]),
+      el("div", { class: "actions" }, [
+        el("button", {
+          class: "btn btn-primary",
+          text: "导入",
+          onclick: async (event) => {
+            event.target.disabled = true;
+            try {
+              const revision = await call("/api/cases/import", { method: "POST", body: { yaml: textareaNode.value } });
+              location.hash = `#/case/${revision.caseId}`;
+            } catch (error) {
+              form.prepend(errorBox(error));
+            } finally {
+              event.target.disabled = false;
+            }
+          },
+        }),
+        el("button", {
+          class: "btn btn-outline-secondary",
+          text: "改为手工填写",
+          onclick: () => {
+            location.hash = "#/case-new-form";
+          },
+        }),
+      ]),
     ]),
   ]);
-  app.replaceChildren(form);
+  app.replaceChildren(pageHead("导入用例"), form);
 }
 
 // ---------------------------------------------------------------------------
@@ -962,11 +1230,18 @@ function passedLabel(passed) {
   return passed === null ? "未判定" : passed ? "通过" : "失败";
 }
 
+/**
+ * 结果卡的左侧色条档位。
+ *
+ * 这里**与 `passedBadge` 保持同一套档位**：`passed === null` 走 `undecided`，
+ * 不能落回 `skipped`——否则会出现「药丸写着未判定（中性灰）、左侧色条却是
+ * 跳过的琥珀色」这种自相矛盾的卡片，而 D8 的整个要点就是这两者不能混。
+ */
 function verdictClass(status, passed) {
   if (status === "running" || status === "queued") return "running";
   if (passed === true) return "passed";
   if (passed === false) return "failed";
-  return "skipped";
+  return "undecided";
 }
 
 function download(filename, content) {
@@ -978,12 +1253,31 @@ function download(filename, content) {
   URL.revokeObjectURL(url);
 }
 
+/** 加载骨架。比一行「加载中……」更像一个正在成形的页面。 */
+function skeleton() {
+  return el("div", { class: "skeleton", "aria-busy": "true" }, [el("span"), el("span"), el("span")]);
+}
+
+/** 顶栏当前页高亮。`#/case/<id>` 算「用例」那一档，`#/case-new-form` 算「导入」。 */
+function setActiveNav(head) {
+  const key =
+    head === "" || head === "cases" || head === "case" ? "cases"
+      : head === "runs" || head === "run" ? "runs"
+        : head === "new" || head === "case-new-form" ? "new"
+          : null;
+  for (const link of document.querySelectorAll("#nav a")) {
+    if (link.dataset.nav === key) link.setAttribute("aria-current", "page");
+    else link.removeAttribute("aria-current");
+  }
+}
+
 async function route() {
   const app = document.getElementById("app");
-  app.replaceChildren(el("p", { class: "hint", text: "加载中……" }));
+  app.replaceChildren(skeleton());
   clearTimeout(pollTimer);
   const hash = location.hash.replace(/^#\/?/, "");
   const [head, id] = hash.split("/");
+  setActiveNav(head);
 
   try {
     await loadEngines();
@@ -993,20 +1287,24 @@ async function route() {
     else if (head === "new") viewNew(app);
     else if (head === "runs") await viewRuns(app);
     else if (head === "run" && id) await viewRun(app, id);
-    else app.replaceChildren(el("p", { text: `未知路由 #/${hash}` }));
+    else app.replaceChildren(pageHead("未知路由"), el("p", { text: `#/${hash}` }));
   } catch (error) {
-    app.replaceChildren(el("h1", { text: "出错了" }), errorBox(error));
+    app.replaceChildren(pageHead("出错了"), errorBox(error));
   }
 }
 
 /** 队列状态放在顶栏：`contextsActive` 运行结束后必须回到 0，否则说明 context 泄漏了。 */
 async function refreshQueue() {
+  const node = document.getElementById("queue");
   try {
     const status = await call("/api/queue");
-    document.getElementById("queue").textContent =
-      `队列 ${status.queued}・在跑 ${status.active}・context ${status.contextsActive}`;
+    node.textContent = `队列 ${status.queued}・在跑 ${status.active}・context ${status.contextsActive}`;
+    // 状态点由 CSS 伪元素画，所以这里只挂 data-state。
+    // 不能加子节点：textContent 每次轮询整体覆写，子节点留不住。
+    node.dataset.state = status.contextsActive > 0 ? "busy" : "ok";
   } catch {
-    document.getElementById("queue").textContent = "服务不可达";
+    node.textContent = "服务不可达";
+    node.dataset.state = "down";
   }
 }
 

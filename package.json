@@ -19,6 +19,7 @@
     "doctor": "node --experimental-strip-types src/cli.ts doctor"
   },
   "dependencies": {
+    "bootstrap": "^5.3.8",
     "playwright": "^1.49.0",
     "yaml": "^2.6.0",
     "zod": "^4.0.0"
