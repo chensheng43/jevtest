@@ -247,6 +247,10 @@ const next = await session.observe();     // 后
 | 不引入前端构建工具链 | 原生 HTML/CSS/JS。`tsc` 是编译器，不算打包器。前端库走 `/vendor/` 从 `node_modules` 直引，仍然不打包 |
 | 后端依赖控制在 3 个 | 加依赖前先问"手写要多少行"。浏览器侧依赖（`bootstrap`）不算在内，它不进 Node 进程 |
 | 前端只做展示，不做判断 | 三态怎么显示由 `style.css` 决定，但**哪一态**由 `app.js` 的 `passedBadge` / `verdictBadge` 唯一决定。D9/D8 的视觉区分由 `tests/frontend.test.ts` 守着 |
+| 编辑器的草稿是唯一事实来源 | 控件在 `input` 时写回 `draft`，`formToDefinition(draft)` 是纯函数、不读 DOM。两处读值必然分叉，表现是「填了但保存后没有」（D19） |
+| 子节点列表用 `setChildren(node, [...])` | 直接 `replaceChildren` 传数组会被转成字符串（页面上出现 `[object HTMLDivElement]`），传 `null` 会渲染出字面的 "null"，两种都不报错。单个节点直接 `replaceChildren` 没问题 |
+| 标签页与折叠不引 Bootstrap 的 JS | 手写 `tabs()` / 原生 `<details>`。用 `bootstrap.js` 的前提是先按 D18 重估 `/vendor` 的信任边界 |
+| 前端的纯逻辑放在 `#region 纯函数` 之间 | 那两段不碰 DOM，`tests/frontend.test.ts` 会把它们抠出来跑往返测试——这是不引 jsdom 也能测到前端逻辑的唯一口子（D19） |
 | 错误信息给人看 | 说清原因和怎么修，不要只抛 `Error: failed` |
 | 字符串联合类型代替 `enum` | `erasableSyntaxOnly` 要求 |
 
