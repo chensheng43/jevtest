@@ -14,7 +14,7 @@
  * 事件模型本身不用动——`seq` 语义天然兼容 `Last-Event-ID`。
  */
 
-import type { RunEvent, SeqEvent } from "../schema/events.ts";
+import type { EventSink, RunEvent, SeqEvent } from "../schema/events.ts";
 
 /** 环形缓冲容量。一次运行的事件数远小于此，留足余量 */
 export const DEFAULT_CAPACITY = 500;
@@ -41,7 +41,18 @@ export interface EventLog {
 }
 
 export function createEventLog(runId: string, capacity?: number): EventLog {
-  throw new Error("未实现：P0 待实现");
+  // runId 只用于校验调用方拿的是不是同一个运行的日志——事件本身已经带了 runId，
+  // 所以这里只需要在日志对象上留个记号，不必再往每条事件里塞一遍。
+  const log = createLog(capacity);
+  return {
+    ...log,
+    emit: (event) => {
+      if (event.runId !== runId) {
+        throw new Error(`事件 runId (${event.runId}) 与日志 (${runId}) 不匹配：写错日志会让前端串台`);
+      }
+      log.emit(event);
+    },
+  };
 }
 
 /**
@@ -56,5 +67,173 @@ export interface GlobalBus {
 }
 
 export function createGlobalBus(): GlobalBus {
-  throw new Error("未实现：P0 待实现");
+  // 全局总线不校验 runId——它本来就是跨运行的，来源靠事件自带的 runId 区分。
+  const log = createLog();
+  return { emit: (event) => log.emit(event), subscribe: (since) => log.subscribe(since) };
+}
+
+/**
+ * 保留多少个运行的事件日志。
+ *
+ * 已结束的运行**不能立刻丢日志**：前端刷新页面时会从 `seq = 0` 重放，
+ * 那时运行早就结束了。但也不能无限留——每个日志最多 500 条事件。
+ * 100 个运行 × 500 条 ≈ 几万条小对象，对本项目的规模是安全的量级，
+ * 同时保证了「翻回上一次运行」这条最常见的用法还能看到过程。
+ */
+export const MAX_RETAINED_LOGS = 100;
+
+/**
+ * 事件路由器：把 runner 发出的**单一事件流**分派到各运行自己的日志。
+ *
+ * 为什么要这一层：`RunnerDeps.events` 是一个 `EventSink`，而前端要按 runId
+ * 增量拉取（`GET /api/runs/:id/events`）。若只给全局总线，列表页够用但结果页
+ * 拿不到「该运行的历史」；若只给单运行日志，列表页就得订阅每个运行。
+ *
+ * 按 `runId` 分派同时解决了两件事，代价只是这里十几行。
+ */
+export interface EventRouter {
+  /** 传给 `RunnerDeps.events` 的那个 sink */
+  sink: EventSink;
+  /** 取（或按需创建）某个运行的事件日志。**未创建时返回一个空日志**，供不存在的事件端点用 */
+  log(runId: string): EventLog;
+  bus: GlobalBus;
+  /** 运行结束、报告已落盘后调用，按 MAX_RETAINED_LOGS 淘汰最旧的日志 */
+  retire(runId: string): void;
+}
+
+export function createEventRouter(): EventRouter {
+  /** 插入顺序即「创建或完成的先后」——retire 会把该 run 重新插到末尾，淘汰时从头丢。 */
+  const logs = new Map<string, EventLog>();
+  const bus = createGlobalBus();
+
+  const log = (runId: string): EventLog => {
+    let existing = logs.get(runId);
+    if (existing === undefined) {
+      existing = createEventLog(runId);
+      logs.set(runId, existing);
+    }
+    return existing;
+  };
+
+  return {
+    sink: {
+      emit: (event) => {
+        // 先入该运行的日志再上总线：总线是「顺便看一眼」的旁路，
+        // 任何一边出问题都不该让另一边收不到事件。
+        log(event.runId).emit(event);
+        bus.emit(event);
+      },
+    },
+    log,
+    bus,
+    retire: (runId) => {
+      const existing = logs.get(runId);
+      if (existing === undefined) return;
+      // 重新插到 Map 末尾 = 标记为「最近完成」，淘汰时先丢最早的那批。
+      logs.delete(runId);
+      logs.set(runId, existing);
+      while (logs.size > MAX_RETAINED_LOGS) {
+        const oldest = logs.keys().next().value;
+        if (oldest === undefined || oldest === runId) break;
+        logs.delete(oldest);
+      }
+    },
+  };
+}
+
+/**
+ * 两种日志的公共实现。
+ *
+ * 抽出来的唯一理由是**订阅语义必须完全一致**——两处各写一遍的话，
+ * 「close 后挂起的 next 立即返回 null」这类细节迟早只在一边被改对。
+ */
+function createLog(capacity: number = DEFAULT_CAPACITY): EventLog {
+  /** 环形缓冲。超出容量时从头部丢弃——前端已按 seq 增量消费，丢的只会是更早的历史。 */
+  const buffer: SeqEvent[] = [];
+  /**
+   * 唤醒器集合。
+   *
+   * 每个挂起的 `next()` 往里放一个「叫醒我」的回调：新事件到达或日志关闭时全部触发，
+   * 让它们各自回循环里重新判断（而不是在这里替它们决定返回什么）。
+   * 这样 `next()` 的正确性只依赖循环本身，不依赖唤醒的时机与次数。
+   */
+  const waiters = new Set<() => void>();
+  let seq = 0;
+  let closed = false;
+
+  const wakeAll = (): void => {
+    for (const wake of [...waiters]) wake();
+  };
+
+  const emit = (event: RunEvent): void => {
+    if (closed) return; // 关闭后的事件是迟到者（例如 cancel 后的收尾日志），丢弃比抛错合适
+    seq += 1;
+    // 展开联合类型再补字段，TS 无法自行推出这是 SeqEvent 的分支，故断言。
+    const withSeq = { ...event, seq, ts: new Date().toISOString() } as SeqEvent;
+    buffer.push(withSeq);
+    while (buffer.length > capacity) buffer.shift();
+    wakeAll();
+  };
+
+  const subscribe = (since: number): Subscription => {
+    /**
+     * 游标是**每个订阅自己的**，不共享。
+     *
+     * 共享游标看起来更省事，但两个前端标签页就会互相抢事件：A 拉走的事件 B 再也看不到。
+     */
+    let cursor = Number.isFinite(since) ? since : 0;
+    let active = true;
+
+    const replay = buffer.filter((event) => event.seq > cursor);
+    if (replay.length > 0) {
+      // 回放的事件在语义上「已经消费过」——所以游标直接推进到最新，
+      // 否则下一次 next() 会把同一批事件再发一遍。
+      cursor = replay[replay.length - 1]?.seq ?? cursor;
+    }
+
+    return {
+      replay,
+      async next(timeoutMs: number): Promise<SeqEvent | null> {
+        const deadline = Date.now() + Math.max(0, timeoutMs);
+        for (;;) {
+          if (!active || closed) return null;
+          const found = buffer.find((event) => event.seq > cursor);
+          if (found) {
+            cursor = found.seq;
+            return found;
+          }
+          const remaining = deadline - Date.now();
+          if (remaining <= 0) return null;
+          await new Promise<void>((resolve) => {
+            // 唤醒器把自己从集合里摘掉再 resolve：超时与「被唤醒」走同一条清理路径，
+            // 避免回调在 waiters 里越积越多。
+            const wake = (): void => {
+              waiters.delete(wake);
+              clearTimeout(timer);
+              resolve();
+            };
+            const timer = setTimeout(wake, remaining);
+            waiters.add(wake);
+          });
+        }
+      },
+      unsubscribe(): void {
+        active = false;
+        wakeAll();
+      },
+    };
+  };
+
+  const close = (): void => {
+    closed = true;
+    wakeAll();
+  };
+
+  return {
+    emit,
+    subscribe,
+    lastSeq: () => seq,
+    all: () => [...buffer],
+    close,
+  };
 }

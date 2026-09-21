@@ -1,60 +1,377 @@
 /*
  * 前端样式。原生 CSS，不引入任何构建工具链。
  *
- * 尚未实现（P1）。届时需要覆盖：
- *   - 元素表（带序号、role、当前值）与概率条
- *   - 目标高亮叠加层（按元素 rect 的百分比定位，hover 时显示）
- *   - 动作轨迹列表（步号、动作、耗时、页面是否变化）
- *   - 三层断言的逐条结果，其中 skipped 必须与 passed / failed 视觉上明显不同
- *   - 护栏命中时的红色横幅
+ * 一条不能省的视觉约束（D9）：**「跳过」必须与「通过」「失败」明显不同**。
+ * 把 skipped 画成绿色等于在界面上谎报覆盖——比失败更危险，因为它让人以为测过了。
+ * 所以三态各有自己的颜色与底色，且跳过头像刻意不太显眼（它既不是好消息也不是坏消息）。
  */
+
+:root {
+  --bg: #fafafa;
+  --panel: #ffffff;
+  --ink: #1a1a1a;
+  --muted: #6b7280;
+  --line: #e4e4e7;
+  --accent: #1d4ed8;
+  --ok: #15803d;
+  --bad: #b91c1c;
+  --skip: #a16207;
+  --warn-bg: #fef3c7;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #18181b;
+    --panel: #232327;
+    --ink: #e4e4e7;
+    --muted: #a1a1aa;
+    --line: #3f3f46;
+    --accent: #93c5fd;
+    --ok: #4ade80;
+    --bad: #fca5a5;
+    --skip: #fcd34d;
+    --warn-bg: #422006;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
 
 body {
   margin: 0;
-  padding: 2rem;
   font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   line-height: 1.6;
-  color: #1a1a1a;
-  background: #fafafa;
+  color: var(--ink);
+  background: var(--bg);
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 1.25rem;
+  padding: 0.6rem 1.25rem;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
+.brand {
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: var(--ink);
+  text-decoration: none;
+}
+
+.topbar nav {
+  display: flex;
+  gap: 1rem;
+}
+
+.topbar a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.topbar a:hover {
+  text-decoration: underline;
+}
+
+.queue {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 0.85rem;
+  font-variant-numeric: tabular-nums;
 }
 
 main {
-  max-width: 46rem;
+  max-width: 62rem;
   margin: 0 auto;
+  padding: 1.5rem 1.25rem 4rem;
 }
 
 h1 {
-  margin: 0 0 0.5rem;
-  font-size: 1.6rem;
+  font-size: 1.5rem;
+  margin: 0 0 0.75rem;
 }
 
-.status {
-  color: #b45309;
-  font-weight: 600;
+h2 {
+  font-size: 1.1rem;
+  margin: 1.25rem 0 0.5rem;
+}
+
+h4 {
+  font-size: 0.95rem;
+  margin: 0.9rem 0 0.35rem;
+  color: var(--muted);
 }
 
 .hint {
-  color: #52525b;
-  font-size: 0.9rem;
+  color: var(--muted);
+  font-size: 0.87rem;
+  margin: 0.35rem 0;
 }
 
 code {
   padding: 0.1rem 0.35rem;
   border-radius: 4px;
-  background: #e4e4e7;
+  background: var(--line);
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
   font-size: 0.85em;
 }
 
-@media (prefers-color-scheme: dark) {
-  body {
-    color: #e4e4e7;
-    background: #18181b;
-  }
-  .hint {
-    color: #a1a1aa;
-  }
-  code {
-    background: #27272a;
-  }
+/* ---------- 表格 ---------- */
+
+table.grid {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+table.grid th,
+table.grid td {
+  padding: 0.45rem 0.6rem;
+  text-align: left;
+  border-bottom: 1px solid var(--line);
+  font-size: 0.9rem;
+  vertical-align: top;
+}
+
+table.grid th {
+  color: var(--muted);
+  font-weight: 600;
+  background: color-mix(in srgb, var(--line) 40%, transparent);
+}
+
+table.grid tr:last-child td {
+  border-bottom: none;
+}
+
+td.path {
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.82rem;
+}
+
+/* ---------- 三态：passed / failed / skipped ---------- */
+
+.passed {
+  color: var(--ok);
+  font-weight: 600;
+}
+
+.failed {
+  color: var(--bad);
+  font-weight: 600;
+}
+
+.skipped {
+  color: var(--skip);
+  font-weight: 600;
+  font-style: italic;
+}
+
+.running {
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.verdict {
+  text-decoration: none;
+}
+
+.verdict-card {
+  border-left: 5px solid var(--line);
+}
+
+.verdict-card.passed {
+  border-left-color: var(--ok);
+}
+
+.verdict-card.failed {
+  border-left-color: var(--bad);
+}
+
+.verdict-card.skipped {
+  border-left-color: var(--skip);
+}
+
+.verdict-card.running {
+  border-left-color: var(--accent);
+}
+
+.verdict-card.passed h2,
+.verdict-card.failed h2 {
+  color: inherit;
+}
+
+/* ---------- 卡片与表单 ---------- */
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 1rem 1.1rem;
+  margin: 1rem 0;
+}
+
+.field {
+  margin: 0.6rem 0;
+}
+
+label > span {
+  display: block;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+input[type="text"],
+input[type="file"],
+input:not([type]),
+textarea,
+select {
+  width: 100%;
+  padding: 0.4rem 0.5rem;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.9rem;
+}
+
+textarea {
+  resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+.row {
+  display: flex;
+  gap: 0.4rem;
+  align-items: center;
+  margin-bottom: 0.35rem;
+  flex-wrap: wrap;
+}
+
+.row input {
+  flex: 1 1 10rem;
+}
+
+.rows {
+  margin: 0.4rem 0;
+}
+
+.actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 1rem;
+  flex-wrap: wrap;
+}
+
+button {
+  padding: 0.35rem 0.8rem;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--panel);
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.9rem;
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+button.danger {
+  color: var(--bad);
+  border-color: color-mix(in srgb, var(--bad) 40%, var(--line));
+}
+
+button.small {
+  padding: 0.15rem 0.5rem;
+  font-size: 0.82rem;
+}
+
+/* ---------- 提示块 ---------- */
+
+.error,
+.note {
+  border-radius: 6px;
+  padding: 0.6rem 0.8rem;
+  margin: 0.75rem 0;
+  font-size: 0.9rem;
+}
+
+.error {
+  background: color-mix(in srgb, var(--bad) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--bad) 45%, transparent);
+}
+
+.note {
+  background: var(--warn-bg);
+  border: 1px solid color-mix(in srgb, var(--skip) 45%, transparent);
+}
+
+.blocking {
+  color: var(--bad);
+  font-weight: 600;
+}
+
+/* 护栏命中是**好结果**（安全网起作用了），但对 CI 而言是必须看见的信号，
+  所以用醒目底色而不是普通正文。 */
+.guardrail {
+  background: color-mix(in srgb, var(--skip) 25%, transparent);
+  border-left: 4px solid var(--skip);
+  padding: 0.5rem 0.7rem;
+  border-radius: 4px;
+}
+
+/* ---------- 事件流 ---------- */
+
+.events {
+  list-style: none;
+  margin: 0.5rem 0;
+  padding: 0.5rem 0.7rem;
+  max-height: 18rem;
+  overflow-y: auto;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.8rem;
+}
+
+.events li {
+  padding: 0.1rem 0;
+  border-bottom: 1px dotted var(--line);
+  white-space: pre-wrap;
+}
+
+.ev-guardrail-blocked {
+  color: var(--bad);
+  font-weight: 600;
+}
+
+.ev-run-finished {
+  font-weight: 600;
+}
+
+.ev-step-skipped {
+  color: var(--skip);
 }

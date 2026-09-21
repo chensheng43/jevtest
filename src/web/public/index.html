@@ -13,14 +13,16 @@
     <link rel="stylesheet" href="/style.css" />
   </head>
   <body>
-    <main>
-      <h1>jevtest</h1>
-      <p class="status">界面尚未实现（P1）。</p>
-      <p class="hint">
-        当前骨架只包含模块与接口定义。先用命令行跑通用例：
-        <code>npm run dev -- run cases/wikipedia-godel.yaml</code>
-      </p>
-    </main>
+    <header class="topbar">
+      <a class="brand" href="#/cases">jevtest</a>
+      <nav>
+        <a href="#/cases">用例</a>
+        <a href="#/runs">运行历史</a>
+        <a href="#/new">新建用例</a>
+      </nav>
+      <span class="queue" id="queue" title="在途浏览器 context 数，运行结束后应回到 0"></span>
+    </header>
+    <main id="app"></main>
     <script type="module" src="/app.js"></script>
   </body>
 </html>
