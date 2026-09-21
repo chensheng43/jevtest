@@ -107,9 +107,19 @@ test("resolveVendorPath 只放行允许的扩展名", () => {
   // 也接受已经剥掉 /vendor 前缀的路径。
   assert.equal(resolveVendorPath(root, "zod/index.js"), join(root, "zod", "index.js"));
 
+  // Bootstrap 的样式表走同一条路由（前端不打包，直接从 node_modules 引）。
+  assert.equal(
+    resolveVendorPath(root, "/vendor/bootstrap/dist/css/bootstrap.min.css"),
+    join(root, "bootstrap", "dist", "css", "bootstrap.min.css"),
+  );
+
   assert.equal(resolveVendorPath(root, "/vendor/zod/index.ts"), null);
   assert.equal(resolveVendorPath(root, "/vendor/.env"), null);
   assert.equal(resolveVendorPath(root, "/vendor/"), null);
+  // 能执行的东西一律不放行——.css 进来了，不代表 .html/.svg 也该进来。
+  assert.equal(resolveVendorPath(root, "/vendor/x.html"), null);
+  assert.equal(resolveVendorPath(root, "/vendor/x.svg"), null);
+  assert.equal(resolveVendorPath(root, "/vendor/x.mjs"), null);
 });
 
 test("resolveVendorPath 挡住各类目录穿越", () => {

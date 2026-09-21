@@ -40,7 +40,13 @@ npm test
 | `security.test.ts` | 三道闸的反向用例、`/vendor` 的穿越防护（含 NUL 与各类编码） |
 | `events.test.ts` / `api.test.ts` | 事件的 seq 语义与回放；HTTP 集成（含 413 流式限长、409 带 currentRevision、路径穿越、令牌不泄漏） |
 | `admission.test.ts` | 准入规则逐条命中/不命中 |
+| `frontend.test.ts` | 前端静态资产的**契约**（无 DOM 环境，见下）：`app.js` 查的 id 在 `index.html` 里都存在、令牌头名与 `security.ts` 一致、`/vendor/` 引用都在白名单内、**D9/D8 的三态与未判定取自互不相同的色系** |
 | `e2e/fixture.e2e.test.ts` | **真浏览器**：观测/几何/遮挡命中测试、全链路（输入→提交→动态结果→断言→报告自包含）、护栏拦截、readonly 的候选集、`contextsActive` 归零 |
+
+`frontend.test.ts` 不断言 DOM 结构、也不截图——项目没有 jsdom，也不打算引入。
+它只守「改了之后**页面照常打开、但行为静默错掉**」那一类约定，因为那类问题
+`npm test` 本来抓不到。界面本身长什么样，仍然只能靠人工点一遍
+（这正是 README 待办里那条「人工点一遍 `jevtest serve`」）。
 
 需要真 Chromium。没装时整组**显式跳过**（`npx playwright install chromium`），
 而不是让 `npm test` 变红——环境缺浏览器与代码坏掉是两回事。
