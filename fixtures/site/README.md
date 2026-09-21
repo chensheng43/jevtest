@@ -27,6 +27,42 @@
 变成了可自动化的断言**。参考项目用 `scripts/check_guards.py` 的
 `data:text/html` 内联页面做类似的事，这里改成独立文件以便复用与维护。
 
-## 尚未实现
+## 现状
 
-P0 阶段仅占位。站点文件与对应的 `tests/e2e/fixture.e2e.test.ts` 在 P0 实现代码时一并补齐。
+上表已全部落地：
+
+| 文件 | 内容 |
+| --- | --- |
+| `index.html` | 搜索表单、动态结果卡片、危险按钮、四个陷阱元素 |
+| `detail.html` | 返回按钮 + 面包屑 + 按 `?id=` 渲染的设备信息 |
+| `style.css` | 含两条功能性样式：浮层必须盖住按钮中心点、离屏按钮必须在首屏之外 |
+| `app.js` | 动态渲染（rAF）、自动补全候选（setTimeout）、陷阱定时器、`window.__fixture` 状态 |
+| `detail.js` | 详情页填充与返回 |
+
+配套的静态服务在 `tests/e2e/fixture-server.ts`，导出
+`startFixtureServer(): Promise<{ url: string; close(): Promise<void> }>`，
+端口用 0 由系统分配，只服务本目录。
+
+### 改这个站点时必须知道的三件事
+
+1. **首屏只有 1120x780，超出视口的元素根本不进元素表。** 陷阱元素、危险按钮、
+   搜索表单里的每一个控件都必须落在首屏内——它们各自对应的断言都以
+   「目标出现在元素表里」为前提。把某一段往后挪，断言会变成空转而**仍然是绿的**。
+   `style.css` 里所有间距都压得很小，就是为了这个，不要随手调大。
+2. **动态内容要用 `requestAnimationFrame`，不要用 `setTimeout`。**
+   `settleDocument` 等的是**两个 rAF**（`SETTLE_MS` 只是兜底上限，不是等待时长），
+   headless 下两个 rAF 只要几毫秒；`setTimeout(…, 20)` 会输给它，
+   于是「卡片渲染了却不在元素表里」。
+   唯一的例外是自动补全候选——它要的正是「慢一点出现」，
+   因为 combobox 模式的 settle 会一直等到候选出现（上限 200ms）。
+3. **不访问外网、不调用任何 API。** 这是它存在的前提。
+
+### 可用的调试开关
+
+- `index.html?trapDelay=<ms>` —— 覆写陷阱元素的生效延迟（默认 1500ms）。
+  调大可以放宽「观测时有效、执行前失效」这个时间窗，便于在慢机器上排查。
+- `window.__fixture` —— 页面上的状态：`deleted` / `searched` / `navigated` /
+  `trapClicked` / `trapMoved` / `trapDisabled` / `trapDelayMs`。
+  **它是安全断言的物证**：护栏拦下动作时，`trapClicked` 与 `deleted`
+  必须仍是初始值——只看 `status` 是不够的。
+

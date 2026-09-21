@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>设备详情</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header>
+  <!--
+    面包屑。它同时是「这是一个新文档」的物证：导航到这里之后，
+    在 index.html 上做的观测必须失效——window.__jev 的节点身份缓存被重置，
+    旧决策引用的 node id 全部作废（见 playwright-session.ts 的 actionStillFresh）。
+  -->
+  <nav aria-label="面包屑">
+    <a href="index.html">首页</a> / <a href="index.html">设备台账</a> / <span id="crumb-current">设备详情</span>
+  </nav>
+  <h1 id="device-name">设备详情</h1>
+</header>
+
+<main>
+  <p>
+    <button id="back">返回列表</button>
+  </p>
+
+  <dl id="device-meta">
+    <dt>分类</dt><dd id="device-category">—</dd>
+    <dt>状态</dt><dd id="device-status">—</dd>
+    <dt>位置</dt><dd id="device-location">—</dd>
+  </dl>
+
+  <p class="note">
+    这是一个独立的文档。回到列表页之后，页面上会重新出现「查看详情」按钮，
+    但它们的节点身份与这里的一切没有任何关系。
+  </p>
+</main>
+
+<script src="detail.js"></script>
+</body>
+</html>

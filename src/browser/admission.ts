@@ -84,8 +84,14 @@ export const ADMISSION_RULES: readonly AdmissionRule[] = [
     id: "same-origin-frames",
     severity: "warning",
     rationale: "limitations.md §2：同源 iframe 技术可读，但当前未实现遍历",
-    hit: (s, c) => {
-      const sameOrigin = s.frames - s.crossOriginFrames;
+    hit: (s) => {
+      // `frames` 含主文档（见 AdmissionStats.frames），所以要减掉 1 才是同源子 frame 数。
+      // **这个 1 不能省**：省掉的话任何一个没有 iframe 的页面都会命中本规则，
+      // 准入检查会退化成对每一页都报一条「检测到 1 个同源 iframe」的噪声——
+      // 而假阳性正是这个模块存在的理由。
+      // Math.max 兜住「frame 枚举失败」的 0：那时 frames - crossOrigin 可能算出 -1，
+      // 不兜的话消息里会出现「检测到 -1 个同源 iframe」。
+      const sameOrigin = Math.max(0, s.frames - s.crossOriginFrames - 1);
       return sameOrigin > 0 ? `检测到 ${sameOrigin} 个同源 iframe，当前只遍历主文档` : null;
     },
   },
@@ -122,7 +128,24 @@ export const ADMISSION_RULES: readonly AdmissionRule[] = [
  * 不碰浏览器、不调用模型，因此可以拿构造的 stats 直接单元测试每一条规则。
  */
 export function admit(stats: AdmissionStats, caseDef: Case): AdmissionReport {
-  throw new Error("未实现：P0 待实现");
+  const blocking: string[] = [];
+  const warnings: string[] = [];
+
+  for (const rule of ADMISSION_RULES) {
+    let message: string | null;
+    try {
+      message = rule.hit(stats, caseDef);
+    } catch (error) {
+      // 一条规则写错不该让整个运行失败——准入的定位是「记录与警告，不是闸」
+      // （见文件头）。规则本身有 tests/admission.test.ts 逐条守着。
+      message = `准入规则 ${rule.id} 判定失败：${error instanceof Error ? error.message : String(error)}`;
+    }
+    if (message === null) continue;
+    if (rule.severity === "blocking") blocking.push(message);
+    else warnings.push(message);
+  }
+
+  return { ok: blocking.length === 0, blocking, warnings, stats };
 }
 
 /**
@@ -130,18 +153,44 @@ export function admit(stats: AdmissionStats, caseDef: Case): AdmissionReport {
  *
  * blocking 与 warning 的语气必须明显不同：前者是「这个用例不该跑」，
  * 后者是「跑得动，但结果可能不准，原因如下」。
+ *
+ * 语气差别不是修辞——**blocking 的失败会被误读成被测系统的缺陷**，
+ * 而它其实是平台能力不足（假阳性，见 docs/limitations.md 开头）。
+ * 清单要让读的人第一眼就把这两类分开。
  */
 export function describeAdmission(report: AdmissionReport): string[] {
-  throw new Error("未实现：P0 待实现");
+  const lines: string[] = [];
+
+  if (report.ok) {
+    lines.push("准入结论：可以测。未发现本平台能力之外的特征。");
+  } else {
+    lines.push(
+      `准入结论：不该跑（${report.blocking.length} 项阻断）。` +
+        "命中项属于平台能力不足，不是被测系统的缺陷——不要把它当成本次运行发现的卡点。",
+    );
+  }
+
+  for (const reason of report.blocking) lines.push(`  阻断 · ${reason}`);
+  for (const reason of report.warnings) lines.push(`  警告 · ${reason}`);
+
+  if (report.warnings.length > 0) {
+    lines.push("  以上警告不阻止运行，但结论要打折扣地看：命中的区域可能读不到、读不全或滚不到。");
+  }
+
+  const s = report.stats;
+  lines.push(
+    // frame 数按**含主文档**的口径打印（见 AdmissionStats.frames），
+    // 并显式点出这一点：不然「1 个 frame」会被读成「只有 1 个 iframe」。
+    `  探测统计：frame ${s.frames}（含主文档，其中跨域 ${s.crossOriginFrames}）· shadow root ${s.shadowRoots}` +
+      ` · canvas ${s.canvases} · 密码框 ${s.passwordFields} · 文件上传 ${s.fileInputs}` +
+      ` · 嵌套滚动容器 ${s.nestedScrollContainers} · 可交互元素 ${s.interactiveElements}`,
+  );
+
+  return lines;
 }
 
-// TODO(P0): 实现 admit() —— 遍历 ADMISSION_RULES，按 severity 分拣文案，
-//           ok = blocking 为空。
-// TODO(P0): 实现 describeAdmission()。
-// TODO(P0): 采集侧在 playwright-session.ts 实现 probe()：
-//           - page.frames() 能准确枚举跨域 frame（这是纯 JS 探测做不到的）
-//           - 一次 page.evaluate 统计 shadowRoot / canvas / input[type=password|file] /
-//             overflow:auto 的嵌套滚动容器 / 元素表里的可交互元素数
-//           注意 shadow root 在 frame 内部看不见，只能逐 frame 数。
-// TODO(P0): 让 docs/limitations.md 的准入清单从 ADMISSION_RULES 生成，
+// TODO(P1): 让 docs/limitations.md 的准入清单从 ADMISSION_RULES 生成，
 //           消除两处事实来源（见 docs/architecture.md §11.2）。
+//           现在这两处已经开始漂移了：limitations.md §2 写的是「frames > 1」，
+//           而规则算的是 frames - crossOriginFrames - 1 > 0——意思一样，
+//           但读的人得自己在脑子里换算一次。

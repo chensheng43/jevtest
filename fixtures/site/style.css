@@ -1,0 +1,171 @@
+/*
+ * 夹具站点的样式。
+ *
+ * 只有三条是**功能性的**，其余纯为可读性，改动它们不会影响任何测试：
+ *   1. `.occlusion-box` / `#trap-overlay` —— 浮层必须精确盖住那个按钮的中心点，
+ *      「被遮挡」这条断言才成立。
+ *   2. `.offscreen` —— 必须把按钮放到首屏之外。
+ *   3. 整体**必须紧凑**。视口高度是固定的 780px，页面一高，
+ *      排在后面的控件就掉出元素表，相应的断言会变成空转（见 index.html 里的说明）。
+ *      这也是为什么所有间距都压得很小、说明文字一律单行。
+ */
+
+:root {
+  --line: #d5d9e0;
+  --ink: #1c2028;
+  --muted: #5c6472;
+  --danger: #b3261e;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  padding: 16px 28px 48px;
+  font: 15px/1.45 system-ui, "Segoe UI", "Microsoft YaHei", sans-serif;
+  color: var(--ink);
+  background: #fff;
+}
+
+h1 { font-size: 20px; margin: 4px 0 2px; }
+h2 { font-size: 16px; margin: 14px 0 6px; }
+h3 { font-size: 15px; margin: 0 0 4px; }
+
+nav[aria-label="面包屑"] {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.note {
+  margin: 4px 0;
+  color: var(--muted);
+  font-size: 12px;
+  max-width: 88ch;
+}
+
+section { border-top: 1px solid var(--line); }
+section:first-of-type { border-top: 0; }
+
+form p { margin: 4px 0; }
+
+label {
+  display: inline-block;
+  min-width: 6em;
+  font-size: 14px;
+}
+
+input[type="search"],
+input[type="text"],
+select {
+  padding: 3px 6px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  font: inherit;
+  min-width: 16em;
+}
+
+button {
+  padding: 4px 12px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: #f6f7f9;
+  font: inherit;
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: .5;
+  cursor: not-allowed;
+}
+
+button.danger {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+/* 左右分列而不是上下堆叠：卡片必须矮，否则最下面那张的按钮会掉出视口（见 app.js） */
+.card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 6px 12px;
+  margin: 6px 0;
+  max-width: 70ch;
+}
+
+.card h3 { margin: 0; font-size: 14px; }
+
+.card .meta {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+/* ---------------------------------------------------------------------------
+ * 功能性样式：陷阱元素
+ * ------------------------------------------------------------------------- */
+
+/* 三个陷阱一行排开，省纵向空间（它们必须都在首屏内） */
+.trap-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 6px 0;
+}
+
+/* 浮层。inset:0 + 更高的 z-index 让按钮的中心点被它接住（elementFromPoint 命中它人） */
+.occlusion-box {
+  position: relative;
+  display: inline-flex;
+}
+
+#trap-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  background: rgba(20, 24, 32, .78);
+  color: #fff;
+  font-size: 12px;
+}
+
+/* 静态离屏：绝对定位，不参与流式布局，因此不会把别的元素顶开 */
+.offscreen {
+  position: absolute;
+  top: 2400px;
+  left: 28px;
+}
+
+#picker-options {
+  list-style: none;
+  margin: 2px 0;
+  padding: 0;
+  max-width: 20em;
+}
+
+#picker-options [role="option"] {
+  padding: 3px 8px;
+  border: 1px solid var(--line);
+  border-top: 0;
+  cursor: pointer;
+}
+
+#picker-options [role="option"]:first-child { border-top: 1px solid var(--line); }
+
+dl#device-meta {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 16px;
+  max-width: 40em;
+}
+
+dt { color: var(--muted); }
+dd { margin: 0; }
+
+#search-status, #delete-result { font-size: 13px; color: var(--muted); }

@@ -14,9 +14,14 @@ export class JevtestError extends Error {
 /**
  * 决策所指的页面已经不是当前页面。
  *
- * **这是正常控制流，不是故障。** 页面在观测与执行之间发生了变化，
+ * **在观测路径上这是正常控制流，不是故障。** 页面在观测与执行之间发生了变化，
  * 正确反应是丢弃这次决策、重新观测，而不是报错或重试动作。
  * 参考项目 `jev_ultrafast/browser.py:16` 的 StalePage 是同一个东西。
+ *
+ * ⚠️ **但 `act()` 抛出的 StalePage 不能一律当作「什么都没发生」**：
+ * 输入前的新鲜度复查抛它时确实如此，可 `page.mouse.click` 之后的 settle 阶段
+ * 也可能因导航而抛——那时动作**已经生效了**。因此调用方不能给 `act` 加「捕获后重试」
+ * 或「捕获后丢弃并重发」的包装，否则就是 §6.2 说的双执行。
  */
 export class StalePage extends JevtestError {
   override readonly name = "StalePage";
@@ -67,5 +72,59 @@ export class Cancelled extends JevtestError {
  * 对应参考项目 `jev_ultrafast/browser.py:40-41` 对 `exceptionDetails` 的处理。
  */
 export function mapBrowserError(error: unknown): JevtestError {
-  throw new Error("未实现：P0 待实现");
+  // 已经是我们自己的错误就不再包一层。**这条不能少**：act() 里主动抛的
+  // OccludedTarget 会穿过同一批 catch，被二次包装会丢掉它的类型，
+  // 而调用方正是靠类型区分「元素不可点」与「页面换了」。
+  if (error instanceof JevtestError) return error;
+
+  const message = error instanceof Error ? error.message : String(error);
+
+  // 顺序有意：先判导航类。一次导航会同时产生
+  // "Execution context was destroyed" 与后续的 "Target closed"，
+  // 两者都归 StalePage，但先匹配到的更贴近真实原因。
+  if (STALE_MESSAGES.some((pattern) => pattern.test(message))) {
+    return new StalePage(message, { cause: error });
+  }
+  if (OCCLUDED_MESSAGES.some((pattern) => pattern.test(message))) {
+    return new OccludedTarget(message, { cause: error });
+  }
+  // 认不出来的失败原样保留消息与 cause——报告里要能看到 Playwright 的原话，
+  // 否则排查崩溃时只剩一句「运行失败」。
+  return new JevtestError(message, { cause: error });
 }
+
+/**
+ * 导航打断：**正常控制流**，不是故障。
+ *
+ * 每一条都对应一次「页面在观测与执行之间换了文档」。漏掉任何一条，
+ * 那种跳转就会被记成运行失败（见 docs/development.md §5.3）。
+ */
+const STALE_MESSAGES: readonly RegExp[] = [
+  /execution context was destroyed/i,
+  /cannot find context with specified id/i,
+  /target closed/i,
+  /target page, context or browser has been closed/i,
+  /browser has been closed/i,
+  /page has been closed/i,
+  /navigating frame was detached/i,
+  /frame was detached/i,
+  /frame got detached/i,
+];
+
+/**
+ * 目标在最后一刻变得不可用：被移除、被遮挡、移出视口、被禁用。
+ *
+ * 这些消息只在**我们不该继续操作这个元素**时出现。注意 `element is not stable`：
+ * Playwright 在元素还在动时给这条，而「还在动」正是应该重新决策而不是硬点下去的时刻。
+ */
+const OCCLUDED_MESSAGES: readonly RegExp[] = [
+  /element is not visible/i,
+  /element is outside of the viewport/i,
+  /intercepts pointer events/i,
+  /element is not stable/i,
+  /element is not enabled/i,
+  /element is disabled/i,
+  /element is not attached to the dom/i,
+  /element was detached from the dom/i,
+  /element does not have a bounding box/i,
+];

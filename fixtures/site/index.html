@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>设备台账</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header>
+  <nav aria-label="面包屑"><a href="index.html">首页</a> / <span>设备台账</span></nav>
+  <h1>设备台账</h1>
+  <p class="note">离线夹具站点：不访问外网、不调用任何 API，行为完全确定（见 fixtures/site/README.md）。</p>
+</header>
+
+<main>
+
+  <!--
+    三节内容的**顺序是功能性的**，不是排版偏好。
+
+    视口只有 VIEWPORT 那么高（1120x780），一个元素只要落到首屏之外，
+    snapshot.js 就不会把它放进元素表。而下面这些断言各自都要求目标
+    「出现在元素表里」才谈得上被验证：
+      · 陷阱元素   —— 拦下它的前提是模型有机会选中它；
+      · 危险按钮   —— 护栏断言的前提同上；
+      · 搜索表单   —— 全部控件都要能被真的操作到。
+    所以它们全都挤在首屏之内，说明性文字一律压到一行。
+    把某一段往后挪，就会有断言悄悄地什么都不再验证——而它仍然是绿的。
+  -->
+
+  <section aria-labelledby="trap-heading" id="traps">
+    <h2 id="trap-heading">陷阱元素</h2>
+    <p class="note">
+      这些按钮都不该被点到：观测时它们在候选集里，<strong>执行前</strong>那次几何重解析与命中测试必须把它们拦下来。
+    </p>
+    <div class="trap-row">
+      <button id="trap-mover" class="trap">观测后会移出视口的按钮</button>
+      <button id="trap-disable-later" class="trap">观测后会被禁用的按钮</button>
+      <!--
+        被浮层遮挡：它自己一切正常（尺寸、可见性、在视口内都成立），
+        只有 elementFromPoint 能发现中心点被盖住了。
+        这正是 locator.click() 会替我们做掉、而我们**必须自己做**的那一步（architecture §7.1）。
+      -->
+      <span class="occlusion-box">
+        <button id="trap-occluded" class="trap">被浮层遮挡的按钮</button>
+        <span id="trap-overlay" aria-hidden="true">浮层</span>
+      </span>
+    </div>
+    <!--
+      静态移出视口：绝对定位在首屏之外，不参与上面的流式布局。
+      snapshot.js 按几何判定就不该把它放进元素表——模型连看都看不到它。
+    -->
+    <button id="trap-offscreen" class="trap offscreen">移出视口的按钮</button>
+  </section>
+
+  <section aria-labelledby="danger-heading" id="danger">
+    <h2 id="danger-heading">危险操作</h2>
+    <p class="note">
+      护栏命中时动作必须在任何浏览器输入之前被拦下，因此 <code>session.act</code> 的调用次数应当是 0，
+      页面上的 <code>window.__fixture.deleted</code> 也应当始终是 false。
+    </p>
+    <p>
+      <button id="delete-project" class="danger">删除此项目</button>
+      <span id="delete-result" role="status"></span>
+    </p>
+  </section>
+
+  <section aria-labelledby="search-heading" id="search">
+    <h2 id="search-heading">搜索设备</h2>
+    <form id="search-form">
+      <p>
+        <label for="q">搜索设备</label>
+        <input type="search" id="q" name="q" placeholder="输入设备名称，例如打印机" autocomplete="off">
+      </p>
+
+      <p>
+        <label for="category">分类</label>
+        <select id="category" name="category">
+          <option value="all">全部分类</option>
+          <option value="printer">打印机</option>
+          <option value="router">路由器</option>
+          <option value="scanner" disabled>扫描仪（已下线）</option>
+        </select>
+      </p>
+
+      <p>
+        <label for="only-online">只看在线</label>
+        <input type="checkbox" id="only-online" name="only-online">
+      </p>
+
+      <!--
+        可编辑 combobox（自动补全）。原生 <select> 的 role 也是 combobox，
+        但它的 kind 是 select，走的是另一条分支；只有**可编辑**的 combobox
+        才会触发 settle 的 combobox 模式——等候选渲染出来再观测
+        （见 playwright-session.ts 的 settleCombobox）。
+      -->
+      <p>
+        <label for="model-picker">设备型号</label>
+        <input type="text" id="model-picker" role="combobox" aria-expanded="false"
+               aria-autocomplete="list" aria-controls="picker-options" autocomplete="off">
+      </p>
+      <ul id="picker-options" role="listbox" aria-label="型号候选"></ul>
+
+      <p>
+        <button type="submit" id="search-button">搜索</button>
+        <button type="reset" id="reset-button">重置</button>
+      </p>
+    </form>
+    <p id="search-status" role="status"></p>
+  </section>
+
+  <section aria-labelledby="results-heading" id="results-section">
+    <h2 id="results-heading">搜索结果</h2>
+    <!-- 卡片由 app.js 在提交之后**异步**渲染，用来验证「动态内容出现后的观测」 -->
+    <div id="results"></div>
+  </section>
+
+</main>
+
+<script src="app.js"></script>
+</body>
+</html>
