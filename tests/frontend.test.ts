@@ -21,6 +21,8 @@ import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 import { TOKEN_HEADER, resolveVendorPath } from "../src/web/security.ts";
+import { CaseDefinitionSchema } from "../src/schema/case.ts";
+import { parseCase } from "../src/schema/yaml.ts";
 
 const PUBLIC_DIR = join(import.meta.dirname, "..", "src", "web", "public");
 const read = (name: string) => readFileSync(join(PUBLIC_DIR, name), "utf8");
@@ -159,4 +161,139 @@ test("D8：结果卡色条与药丸用同一套档位（null 不能落回 skippe
   );
   assert.match(body, /"undecided"/, "passed === null 必须走 undecided");
   assert.match(CSS, /\.verdict-card\.undecided\s*\{/, "style.css 里要有对应的色条规则，否则档位落不到样式上");
+});
+
+// ---------------------------------------------------------------------------
+// 界面重排之后新增的跨文件约定
+// ---------------------------------------------------------------------------
+
+test("前端只引 Bootstrap 的 CSS，不引它的 JS（D18 的信任边界）", () => {
+  const scripts = [...HTML.matchAll(/(?:href|src)="(\/vendor\/[^"]+\.js)"/g)].map((match) => match[1] ?? "");
+  assert.deepEqual(
+    scripts,
+    [],
+    `index.html 引了 ${scripts.join("、")}：D18 说引入 Bootstrap 的 JS 组件要把 /vendor 从`
+      + "「读静态文件」变成「运行第三方脚本」，那是一次需要重新权衡的决定，不该顺手做掉。",
+  );
+});
+
+test("app.js 里没有 innerHTML 赋值（el() 的运行时报错之外再加一道静态的）", () => {
+  assert.ok(!/\.innerHTML\s*=/.test(JS), "有地方在直接拼 HTML：动态文本一律走 textContent");
+  assert.ok(!/\.outerHTML\s*=/.test(JS), "同上");
+});
+
+// ---------------------------------------------------------------------------
+// 编辑器：把用例读进来再写出去，不该改变它的意思
+// ---------------------------------------------------------------------------
+
+/** 抠出来的那两段纯函数区的形状（由 app.js 里的 `#region 纯函数` 哨兵标出）。 */
+interface EditorCore {
+  formToDefinition: (draft: Record<string, unknown>) => Record<string, unknown>;
+  normalizeDraft: (def: unknown) => Record<string, unknown>;
+  assertionRows: (draft: Record<string, unknown>) => { recipe: { kind: string }; path: string; value: unknown }[];
+  draftSummary: (draft: Record<string, unknown>) => { assertions: number; limits: number };
+}
+
+/**
+ * 在干净的作用域里执行 app.js 的纯函数区。
+ *
+ * 前端没有 DOM 测试环境——本项目刻意不引 jsdom（见 `docs/development.md`）。
+ * 但「载入一个用例、界面重画一遍、再保存」这条路上最不能靠肉眼保证的一件事是
+ * **有没有东西被丢掉**：丢了不报错，只是断言少了几条。所以这里用最朴素的办法
+ * 把它跑起来：那两段代码不碰 DOM，可以作为一段自包含的脚本求值。
+ */
+function editorCore(source: string): EditorCore {
+  const blocks = [...source.matchAll(/\/\/ #region 纯函数[^\n]*\n([\s\S]*?)\/\/ #endregion/g)]
+    .map((match) => match[1] ?? "");
+  assert.ok(blocks.length >= 2, `app.js 里应该有两段标了「#region 纯函数」的代码，实际 ${blocks.length} 段`);
+  const factory = new Function(`${blocks.join("\n")}
+    return { formToDefinition, normalizeDraft, assertionRows, draftSummary };`);
+  return factory() as EditorCore;
+}
+
+const SEED_CASE = parseCase(
+  readFileSync(join(import.meta.dirname, "..", "cases", "wikipedia-godel.yaml"), "utf8"),
+  "wikipedia-godel.yaml",
+);
+
+test("纯函数区真的能被抠出来跑（不是靠肉眼读代码）", () => {
+  const core = editorCore(JS);
+  assert.equal(typeof core.formToDefinition, "function");
+  assert.ok(core.assertionRows(core.normalizeDraft(SEED_CASE)).length > 0, "种子用例应该能摊出断言行来");
+});
+
+test("种子用例：载入编辑器再保存，语义一字不变", () => {
+  const core = editorCore(JS);
+  const saved = core.formToDefinition(core.normalizeDraft(SEED_CASE));
+  assert.deepEqual(
+    CaseDefinitionSchema.parse(saved),
+    CaseDefinitionSchema.parse(SEED_CASE),
+    "载入再保存改变了用例的语义——界面不会报错，但断言会少掉或条件被改写",
+  );
+});
+
+test("全覆盖：每一个配方与每一处原始字段都落得下去", () => {
+  const core = editorCore(JS);
+  const def = CaseDefinitionSchema.parse({
+    title: "全覆盖",
+    goal: "把所有字段都设一遍",
+    startUrl: "https://example.test/",
+    allowedOrigins: ["https://example.test"],
+    mode: "readonly",
+    budget: { maxSteps: 10, maxModelCalls: 11, maxInputTokens: 12, maxCostUsd: 0.5, maxElapsedMs: 13 },
+    guardrails: [{ labelContains: "删除", role: "button", reason: "别删东西" }],
+    allowDefaultOverride: true,
+    assertions: {
+      final: {
+        // 配方覆盖：contains / notContains。原始字段：equals / matches。
+        url: { equals: "https://example.test/x", contains: ["/x"], notContains: ["/y"], matches: ["^https://"] },
+        title: { equals: "T", contains: ["t"], notContains: ["z"], matches: ["^T"] },
+        text: { equals: "e", contains: ["c"], notContains: ["n"], matches: ["^c"] },
+        controls: [
+          { labelContains: "提交", exists: true },
+          { labelContains: "取消", exists: false },
+          // 这一条含配方表达不了的字段（role / valueEquals / checked），整行走原始编辑器。
+          { labelContains: "邮箱", role: "textbox", valueEquals: "a@b.c", checked: true },
+        ],
+      },
+      trajectory: {
+        statusIn: ["done", "blocked"],
+        maxSteps: 7,
+        mustUse: [{ labelContains: "搜索" }, { role: "searchbox" }],
+        mustNotUse: [{ labelContains: "登录" }, { kind: "select" }],
+        forbiddenKinds: ["fill", "select"],
+        maxIdenticalConsecutive: 4,
+      },
+      quality: {
+        minOperationProbability: 0.3,
+        minTargetProbability: 0.4,
+        maxModelCalls: 8,
+        maxElapsedMs: 9,
+        maxInputTokens: 10,
+        maxCostUsd: 0.1,
+      },
+    },
+  });
+  const saved = core.formToDefinition(core.normalizeDraft(def));
+  assert.deepEqual(
+    CaseDefinitionSchema.parse(saved),
+    CaseDefinitionSchema.parse(def),
+    "有字段在界面上画得出来、保存时却被丢掉（或者顺序被打乱）",
+  );
+});
+
+test("空的 statusIn 必须原样活着——它不是「没设」，而是「任何结束方式都不接受」", () => {
+  const core = editorCore(JS);
+  const def = CaseDefinitionSchema.parse({
+    title: "空 statusIn",
+    goal: "g",
+    startUrl: "https://example.test/",
+    assertions: { trajectory: { statusIn: [] } },
+  });
+  const saved = core.formToDefinition(core.normalizeDraft(def));
+  assert.deepEqual(
+    saved.assertions,
+    { trajectory: { statusIn: [], maxIdenticalConsecutive: 3 } },
+    "空 statusIn 被丢掉了：断言会退回默认的 done，一条必然失败的检查就这样变成了会通过的条件",
+  );
 });

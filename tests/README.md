@@ -19,7 +19,7 @@ npm test
 （见 `fixtures/site/`），不访问外网。外网的 Wikipedia 用例只有显式设置
 `JEVTEST_E2E=1` 时才跑。
 
-## 已收录（468 项）
+## 已收录（486 项）
 
 | 文件 | 覆盖内容 |
 | --- | --- |
@@ -40,13 +40,24 @@ npm test
 | `security.test.ts` | 三道闸的反向用例、`/vendor` 的穿越防护（含 NUL 与各类编码） |
 | `events.test.ts` / `api.test.ts` | 事件的 seq 语义与回放；HTTP 集成（含 413 流式限长、409 带 currentRevision、路径穿越、令牌不泄漏） |
 | `admission.test.ts` | 准入规则逐条命中/不命中 |
-| `frontend.test.ts` | 前端静态资产的**契约**（无 DOM 环境，见下）：`app.js` 查的 id 在 `index.html` 里都存在、令牌头名与 `security.ts` 一致、`/vendor/` 引用都在白名单内、**D9/D8 的三态与未判定取自互不相同的色系** |
+| `frontend.test.ts` | 前端静态资产的**契约**（无 DOM 环境，见下）：`app.js` 查的 id 在 `index.html` 里都存在、令牌头名与 `security.ts` 一致、`/vendor/` 引用都在白名单内、**D9/D8 的三态与未判定取自互不相同的色系**；外加**编辑器纯函数区的往返**——把 `app.js` 里标了 `#region 纯函数` 的两段抠出来求值，断言「种子用例载入再保存语义不变」「每个配方与每处原始字段都落得下去」「空 `statusIn` 原样活着」 |
 | `e2e/fixture.e2e.test.ts` | **真浏览器**：观测/几何/遮挡命中测试、全链路（输入→提交→动态结果→断言→报告自包含）、护栏拦截、readonly 的候选集、`contextsActive` 归零 |
 
 `frontend.test.ts` 不断言 DOM 结构、也不截图——项目没有 jsdom，也不打算引入。
 它只守「改了之后**页面照常打开、但行为静默错掉**」那一类约定，因为那类问题
-`npm test` 本来抓不到。界面本身长什么样，仍然只能靠人工点一遍
-（这正是 README 待办里那条「人工点一遍 `jevtest serve`」）。
+`npm test` 本来抓不到。它唯一执行前端代码的地方是那两段纯函数区（`new Function`，
+不碰 DOM），往返测试就在那里跑。
+
+**界面本身点起来对不对**是另一回事，那由 `scripts/ui-walkthrough.mjs` 负责：
+
+```bash
+npm run walkthrough     # 自己起服务、自己收摊，用临时用例库，不碰 cases/ 与 runs/
+```
+
+它用真 Chromium 走一遍导入、编辑、断言增删、保存后重载、校验标红、结果页分档、
+深色模式与行内删除，并收集控制台/网络报错，截图落在临时目录。这不是 `npm test`
+的一部分（要真浏览器、要几十秒），而是 README 待办里那条「人工点一遍 `jevtest serve`」
+的脚本化版本——它已经抓到过三个真缺陷（见 `docs/decisions.md` D19 末尾）。
 
 需要真 Chromium。没装时整组**显式跳过**（`npx playwright install chromium`），
 而不是让 `npm test` 变红——环境缺浏览器与代码坏掉是两回事。
