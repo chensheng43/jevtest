@@ -15,6 +15,11 @@
  * 泛化成可声明、可配置的东西。
  */
 
+import { z } from "zod";
+import type { ZodType } from "zod";
+
+import { slugify } from "./yaml.ts";
+import { actionKindSchema, runStatusSchema } from "./events.ts";
 import type { ActionKind, Operation, RunStatus } from "./events.ts";
 
 // ---------------------------------------------------------------------------
@@ -230,14 +235,225 @@ export interface CaseRevision {
   savedAt: string;
 }
 
-// TODO(P0): 实现 `CaseDefinitionSchema: ZodType<CaseDefinition, Case>`。
-//
-//   ⚠️ zod v4 的坑：`.default({})` 不会解析默认值，会把 {} 原样返回，
-//   **嵌套默认值全部丢失**。直接后果是 `budget.maxModelCalls` 变成 undefined，
-//   用例预算静默失效、成本无上限。必须使用 `.prefault({})`（v4 的 input-side 默认，
-//   会走 schema 解析），或写成 `.default(() => Budget.parse({}))`。
-//   必须配套一条测试：
-//     CaseDefinitionSchema.parse({ 最小输入 }).budget.maxModelCalls === 40
-//
-// TODO(P0): id 校验 `^[a-z0-9][a-z0-9-]{1,63}$`；从 title 生成 slug，冲突加 `-2`。
-// TODO(P0): allowedOrigins 缺省推导，以及断言「startUrl 的 origin 必须在白名单内」。
+// ---------------------------------------------------------------------------
+// 校验辅助
+// ---------------------------------------------------------------------------
+
+/** `docs/case-format.md` 的 id 规则：小写字母数字开头，其后可含连字符，总长 2~64。 */
+const ID_PATTERN = /^[a-z0-9][a-z0-9-]{1,63}$/;
+
+/**
+ * 只接受 http/https。
+ *
+ * 不能直接放宽到「能被 `new URL()` 解析」：`new URL("file:///x").origin` 是字符串
+ * `"null"`，白名单比对会退化成「所有非 http 协议的站点互相匹配」。
+ */
+function isHttpUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+/** 调用前必须已确认 `value` 是合法 http(s) URL（见上面的 refine）。 */
+function originOf(value: string): string {
+  return new URL(value).origin;
+}
+
+/**
+ * 正则类字段在**保存时**就校验可编译性。
+ *
+ * 否则一个写错的模式要到跑完浏览器、进断言层才炸，而且报的是
+ * `new RegExp()` 的 SyntaxError——没人能从中看出是 YAML 里哪一行写错了。
+ */
+function isCompilableRegex(pattern: string): boolean {
+  try {
+    new RegExp(pattern);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const regexPattern = z.string().refine(isCompilableRegex, {
+  message: "不是合法正则（断言层会执行 new RegExp(pattern)）",
+});
+
+// actionKindSchema / runStatusSchema 来自 events.ts：合法取值表只该有一份。
+
+// ---------------------------------------------------------------------------
+// 各层 schema
+// ---------------------------------------------------------------------------
+
+const textMatchSchema = z.object({
+  equals: z.string().optional(),
+  contains: z.array(z.string()).optional(),
+  notContains: z.array(z.string()).optional(),
+  matches: z.array(regexPattern).optional(),
+});
+
+const controlAssertionSchema = z.object({
+  labelContains: z.string().min(1),
+  role: z.string().optional(),
+  exists: z.boolean().default(true),
+  valueEquals: z.string().optional(),
+  valueContains: z.string().optional(),
+  valueMatches: regexPattern.optional(),
+  checked: z.boolean().optional(),
+});
+
+/**
+ * 至少要有一个匹配条件。
+ *
+ * 空的 `ActionMatch` 不是「什么都不匹配」而是「匹配一切」：写进 `mustNotUse`
+ * 会让每一步都被拦下，而用户以为自己只是漏填了一个字段。
+ */
+const actionMatchSchema = z
+  .object({
+    labelContains: z.string().optional(),
+    labelMatches: regexPattern.optional(),
+    role: z.string().optional(),
+    kind: actionKindSchema.optional(),
+  })
+  .refine(
+    (match) =>
+      match.labelContains !== undefined ||
+      match.labelMatches !== undefined ||
+      match.role !== undefined ||
+      match.kind !== undefined,
+    { message: "至少要填 labelContains / labelMatches / role / kind 之一" },
+  );
+
+const finalAssertionsSchema = z.object({
+  url: textMatchSchema.optional(),
+  title: textMatchSchema.optional(),
+  text: textMatchSchema.optional(),
+  controls: z.array(controlAssertionSchema).optional(),
+});
+
+const trajectoryAssertionsSchema = z.object({
+  // 默认值用函数形式：`.default(["done"])` 会把同一个数组实例发给每次解析，
+  // 调用方一旦原地改它（断言层有可能会 push），后面的解析就跟着变。
+  statusIn: z.array(runStatusSchema).default((): RunStatus[] => ["done"]),
+  maxSteps: z.number().int().positive().optional(),
+  mustUse: z.array(actionMatchSchema).default(() => []),
+  mustNotUse: z.array(actionMatchSchema).default(() => []),
+  forbiddenKinds: z.array(actionKindSchema).default(() => []),
+  maxIdenticalConsecutive: z.number().int().positive().default(3),
+});
+
+const qualityAssertionsSchema = z.object({
+  minOperationProbability: z.number().min(0).max(1).optional(),
+  minTargetProbability: z.number().min(0).max(1).optional(),
+  maxModelCalls: z.number().int().positive().optional(),
+  maxElapsedMs: z.number().int().positive().optional(),
+  maxInputTokens: z.number().int().positive().optional(),
+  maxCostUsd: z.number().nonnegative().optional(),
+});
+
+const assertionsSchema = z.object({
+  final: finalAssertionsSchema.optional(),
+  // trajectory 也用 prefault：默认值表里的 statusIn / maxIdenticalConsecutive
+  // 挂在它下面，不解析的话这两条默认值等于不存在。
+  trajectory: trajectoryAssertionsSchema.prefault({}),
+  quality: qualityAssertionsSchema.optional(),
+});
+
+const budgetSchema = z.object({
+  maxSteps: z.number().int().positive().default(40),
+  maxModelCalls: z.number().int().positive().default(40),
+  maxInputTokens: z.number().int().positive().default(200000),
+  // null = 不设金额上限。引擎未报金额时无法校验，用 null 表示「未知」而不是 0。
+  maxCostUsd: z.number().nonnegative().nullable().default(null),
+  maxElapsedMs: z.number().int().positive().default(300000),
+});
+
+const guardrailSchema = z
+  .object({
+    labelContains: z.string().optional(),
+    labelMatches: regexPattern.optional(),
+    role: z.string().optional(),
+    reason: z.string().min(1),
+  })
+  .refine(
+    (guardrail) =>
+      guardrail.labelContains !== undefined ||
+      guardrail.labelMatches !== undefined ||
+      guardrail.role !== undefined,
+    { message: "护栏至少要有一个匹配条件（labelContains / labelMatches / role），reason 只是拦截时的解释" },
+  );
+
+/**
+ * `allowedOrigins` 的每一项归一化成 origin。
+ *
+ * 比对的是 origin 而非完整 URL：站内路径跳转正常，跳出站点才该拦。
+ * 直接容忍用户把整条 URL 粘进来（`https://a.com/wiki/Main_Page` -> `https://a.com`），
+ * 比让他先自己删掉 path 更省事，也避免白名单因为一条多余路径而静默失配。
+ */
+const originSchema = z
+  .string()
+  .refine(isHttpUrl, { message: "必须是 http/https 的绝对 URL（只会取它的 origin 参与比对）" })
+  .transform(originOf);
+
+/**
+ * `engine` 的缺省值。
+ *
+ * schema 拿不到 `Settings`，所以这里落的是 `settings.defaultEngine` 自己的默认值
+ * （`config.ts` 的 `JEVTEST_DEFAULT_ENGINE`）。两处必须一起改。
+ */
+const DEFAULT_ENGINE = "typesafe";
+
+const caseObjectSchema = z.object({
+  schemaVersion: z.literal(1).default(1),
+  id: z
+    .string()
+    .regex(ID_PATTERN, "id 只能用小写字母、数字与连字符，需以字母或数字开头，长度 2~64")
+    .optional(),
+  title: z.string().min(1),
+  goal: z.string().min(1),
+  startUrl: z.string().refine(isHttpUrl, { message: "startUrl 必须是 http/https 的绝对地址" }),
+  mode: z.enum(["interactive", "readonly"]).default("interactive"),
+  allowedOrigins: z.array(originSchema).optional(),
+  // ⚠️ 必须是 prefault 而不是 default：`.default({})` 会把 {} 原样返回、不走 schema 解析，
+  // budget.maxModelCalls 随之变成 undefined——预算静默失效、成本无上限，且不报错。
+  budget: budgetSchema.prefault({}),
+  guardrails: z.array(guardrailSchema).default(() => []),
+  allowDefaultOverride: z.boolean().default(false),
+  engine: z.string().min(1).default(DEFAULT_ENGINE),
+  assertions: assertionsSchema.prefault({}),
+});
+
+/**
+ * 用例校验器。输出是**默认值已填充的 `Case`**，运行时只消费它。
+ *
+ * 类型参数顺序按 zod v4 的声明（`ZodType<Output, Input>`）：输出是 `Case`、
+ * 接受的是 `CaseDefinition`。（`src/schema/case.ts` 原 TODO 写的
+ * `ZodType<CaseDefinition, Case>` 在 v4 语义下正好反了。）
+ *
+ * 收尾的 transform 做两件必须看到「其他字段」才能做的事：
+ *   1. `id` 缺省时由 `title` 生成 slug。冲突追加 `-2`/`-3` 是 `CaseStore.allocateId`
+ *      的职责——schema 看不到已有用例，只能保证同一 title 得到同一个 slug。
+ *   2. `allowedOrigins` 缺省时由 `startUrl` 推导，并断言推导结果/显式白名单
+ *      一定包含 `startUrl` 的 origin（否则第一次 goto 就会被自己的白名单拦下）。
+ */
+export const CaseDefinitionSchema: ZodType<Case, CaseDefinition> = caseObjectSchema.transform(
+  (definition, ctx) => {
+    const startOrigin = originOf(definition.startUrl);
+    const allowedOrigins = definition.allowedOrigins ?? [startOrigin];
+
+    if (!allowedOrigins.includes(startOrigin)) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["allowedOrigins"],
+        message:
+          `白名单里没有 startUrl 的 origin（${startOrigin}）——` +
+          `第一次导航就会被自己的白名单判为越界；补上它，或删掉 allowedOrigins 让它自动推导`,
+      });
+      return z.NEVER;
+    }
+
+    return { ...definition, id: definition.id ?? slugify(definition.title), allowedOrigins };
+  },
+);

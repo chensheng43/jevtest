@@ -10,6 +10,8 @@
  * 前端的 switch 分支与本文件的 case 一一对应。
  */
 
+import { z } from "zod";
+
 // ---------------------------------------------------------------------------
 // 词汇表
 // ---------------------------------------------------------------------------
@@ -197,5 +199,148 @@ export interface RunStats {
   engineLatencyMs: number;
 }
 
-// TODO(P0): 实现 eventSchema（zod）以校验外部传入的 /api 请求体与磁盘回读的报告。
-//           注意 zod v4 的 .default() 不解析默认值，此处如需默认值必须用 .prefault()。
+// ---------------------------------------------------------------------------
+// zod 形态
+// ---------------------------------------------------------------------------
+
+/**
+ * 词汇表的运行时版本。
+ *
+ * 与上面的 `type` 声明放在一起、并从这里被 `schema/case.ts` 引用，
+ * 是因为「合法取值有哪些」只能有一份：YAML 校验（用例里的 `kind` / `statusIn`）
+ * 与事件校验（`step.decided` 的 `operation`）如果各写一份枚举，
+ * 加一个取值时必然漏掉其中一处，而漏掉的那处会静默放行非法值。
+ */
+export const actionKindSchema = z.enum(["click", "fill", "select", "scroll", "wait"]);
+export const operationSchema = z.enum([
+  "CLICK",
+  "TYPE_TEXT",
+  "SELECT",
+  "SCROLL_UP",
+  "SCROLL_DOWN",
+  "WAIT",
+  "DONE",
+  "BLOCKED",
+]);
+export const runStatusSchema = z.enum([
+  "queued",
+  "running",
+  "done",
+  "blocked",
+  "budget_exceeded",
+  "guardrail_blocked",
+  "cancelled",
+  "error",
+]);
+
+export const runStatsSchema = z.object({
+  steps: z.number().int().nonnegative(),
+  // modelCalls 与 decisions 不是同一个口径（前者含重试），两个都要落盘：
+  // 合并成一个字段就再也拆不出「有多少请求是重试造成的」。
+  modelCalls: z.number().int().nonnegative(),
+  decisions: z.number().int().nonnegative(),
+  inputTokens: z.number().int().nonnegative(),
+  outputTokens: z.number().int().nonnegative(),
+  // nullable 而不是 optional：引擎未报金额时写 null，不能省略也不能用 0 冒充。
+  costUsd: z.number().nonnegative().nullable(),
+  elapsedMs: z.number().nonnegative(),
+  engineLatencyMs: z.number().nonnegative(),
+});
+
+const distributionSchema = z.enum(["full", "degenerate"]);
+
+/**
+ * 事件的判别联合，与上面的 `RunEvent` 一一对应。
+ *
+ * 用 `z.object` 的默认行为（剥离未知键）而不是 strictObject：事件与报告都要
+ * 长期留存，多一个字段就整个读不出来的代价，比放行一个多余字段大得多。
+ * 这里的用途是**校验**外部传入的 /api 请求体与磁盘回读的报告，不是信任边界本身
+ * （信任边界在 web/security.ts 的守卫上）。
+ */
+export const eventSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("run.queued"), runId: z.string(), caseId: z.string() }),
+  z.object({ type: z.literal("run.started"), runId: z.string(), caseId: z.string(), engine: z.string() }),
+  z.object({
+    type: z.literal("step.observed"),
+    runId: z.string(),
+    step: z.number().int().nonnegative(),
+    url: z.string(),
+    elementCount: z.number().int().nonnegative(),
+    omittedActions: z.number().int().nonnegative(),
+    frame: z.number().int().nonnegative().nullable(),
+    elapsedMs: z.number().nonnegative(),
+  }),
+  z.object({
+    type: z.literal("step.decided"),
+    runId: z.string(),
+    step: z.number().int().nonnegative(),
+    operation: operationSchema,
+    operationProbabilities: z.record(z.string(), z.number()),
+    target: z.string().nullable(),
+    targetProbabilities: z.record(z.string(), z.number()),
+    confidence: z.number(),
+    distribution: distributionSchema,
+    engineLatencyMs: z.number().nonnegative(),
+    modelCallsUsed: z.number().int().nonnegative(),
+  }),
+  z.object({
+    type: z.literal("step.executed"),
+    runId: z.string(),
+    step: z.number().int().nonnegative(),
+    action: z.string(),
+    kind: actionKindSchema,
+    operation: operationSchema,
+    probability: z.number(),
+    executed: z.boolean(),
+    text: z.string().nullable(),
+    url: z.string(),
+    // 三态：null 是「没能观测」，不是「没变化」。
+    pageChanged: z.boolean().nullable(),
+    elapsedMs: z.number().nonnegative(),
+  }),
+  z.object({
+    type: z.literal("step.skipped"),
+    runId: z.string(),
+    step: z.number().int().nonnegative(),
+    reason: z.string(),
+  }),
+  z.object({
+    type: z.literal("guardrail.blocked"),
+    runId: z.string(),
+    step: z.number().int().nonnegative(),
+    reason: z.string(),
+    action: z.string(),
+  }),
+  z.object({
+    type: z.literal("assertion.evaluated"),
+    runId: z.string(),
+    passed: z.boolean(),
+    total: z.number().int().nonnegative(),
+    failed: z.array(z.string()),
+    skipped: z.array(z.string()),
+  }),
+  z.object({
+    type: z.literal("run.finished"),
+    runId: z.string(),
+    status: runStatusSchema,
+    passed: z.boolean().nullable(),
+    elapsedMs: z.number().nonnegative(),
+    stats: runStatsSchema,
+  }),
+  z.object({
+    type: z.literal("run.log"),
+    runId: z.string(),
+    level: z.enum(["info", "warn", "error"]),
+    message: z.string(),
+  }),
+]);
+
+/** `SeqEvent` 的校验器：事件本体 + 编号与时间戳。 */
+export const seqEventSchema = z.intersection(
+  eventSchema,
+  z.object({ seq: z.number().int().nonnegative(), ts: z.string() }),
+);
+
+// TODO(P1): 事件里 `record(z.string(), z.number())` 的概率表在语义上要求「和为 1」，
+//   这里只校验了类型。要不要在 schema 层守住归一化，取决于引擎是否可能合法地
+//   给出未归一化的分布——目前只有 typesafe 一个真实引擎，等它有第二个用户再定。

@@ -10,6 +10,10 @@
  * 定义在这里，由 `engine/types.ts` 反向引用。
  */
 
+import { z } from "zod";
+import type { ZodType } from "zod";
+
+import { actionKindSchema, runStatsSchema, runStatusSchema } from "./events.ts";
 import type { ActionKind, RunStats, RunStatus } from "./events.ts";
 
 /** 一次模型调用的用量。引擎未报金额时为 null，不用 0 冒充「未知」。 */
@@ -195,4 +199,183 @@ export interface RunIndexEntry {
   costUsd: number | null;
 }
 
-// TODO(P0): 实现 reportSchema（zod），用于磁盘回读校验与 /api 响应校验。
+// ---------------------------------------------------------------------------
+// zod 形态
+// ---------------------------------------------------------------------------
+
+/**
+ * 校验器与上面手写 interface 的对应关系是**单向锁死**的：`reportSchema` /
+ * `runIndexEntrySchema` 都标了 `ZodType<X, X>`，tsc 因此检查「schema 产出的是 X」——
+ * 字段漏写、类型放得比契约宽、枚举值不对，都会当场编译失败，而不是等到
+ * 磁盘上读回一份坏报告才发现。`report.ts` 的类型是契约，schema 只是它的执行者。
+ * （类型参数顺序按 zod v4 的 `ZodType<Output, Input>`，与 `case.ts` 同。）
+ *
+ * ⚠️ 它**不检查反方向**。zod v4 的 `Input` 是协变的，所以把某个字段收得比契约更紧
+ * （例如把契约里的 `string` 写成枚举）照样能编译通过，而运行时会拒收契约允许的取值——
+ * 这是一条只会在读旧报告时才炸的路径。本文件因此立一条纪律：
+ * **只有契约本身就是枚举的字段（`status` / `kind` / `distribution`）才用枚举校验，
+ * 其余一律按契约的宽度校验。**
+ *
+ * 校验松紧按「物证」二字定：
+ *   - **除类型里显式写了 `| null` 的字段外，一律必填。** 报告是回读的物证，
+ *     少一个字段说明落盘那一刻就已经坏了，静默补默认值等于伪造证据。
+ *   - 计数与序号用 `int().nonnegative()`、时间用 `nonnegative()`，与 `events.ts`
+ *     的 `runStatsSchema` 同口径——两处口径不一致会让「同一份数据两种判法」。
+ *   - **`null` 一律用 `.nullable()`，绝不用 `.optional()`。** 这是本文件最重要的区分：
+ *     `costUsd: null` 是「引擎没报金额」这个有效取值，`pageChanged: null` 是「没能观测」，
+ *     而 `assertion: null` 是「断言层根本没跑」。把三者改成 optional 会让
+ *     「没这个字段」（旧版本写的、或落盘损坏）与这三件不同的事混成一个。
+ *
+ * **不用 `.strictObject()`，用默认的「剥离未知键」。** 这条决定 `events.ts` 已经做过并写了理由，
+ * 报告与事件同属长期留存物：多一个字段就让整份报告读不出来，代价远大于放行一个多余字段
+ * （向前兼容优先于防多余字段）。这里的用途是校验磁盘回读与 /api 响应，
+ * 不是信任边界——信任边界在 `web/security.ts` 的守卫上。
+ */
+const usageSchema = z.object({
+  inputTokens: z.number().int().nonnegative(),
+  outputTokens: z.number().int().nonnegative(),
+  // nullable 而不是 optional：未报金额写 null，不能省略也不能用 0 冒充（§2.5）。
+  costUsd: z.number().nonnegative().nullable(),
+  /** 含重试的实际请求数，因此可能大于 1 */
+  requests: z.number().int().nonnegative(),
+});
+
+const stepRecordSchema = z.object({
+  step: z.number().int().nonnegative(),
+  action: z.string(),
+  kind: actionKindSchema,
+  role: z.string(),
+  // ⚠️ 这里是 `z.string()` 而不是 events.ts 的 `operationSchema`：
+  // `StepRecord.operation` 在 TS 里声明为 `string`（不是 `Operation`），而类型是契约。
+  // 收紧成枚举会拒收契约允许的取值，因此宁可少一层校验。
+  // 但请注意同组的 `kind` 用的是 `actionKindSchema`——那是 TS 类型 `ActionKind` 的精确镜像。
+  // 也就是说 `operation` 是本文件里唯一「类型比词汇表松」的字段，这是**契约的松**，不是实现偷懒：
+  // 建议契约方把 `StepRecord.operation` 收紧成 `Operation`，届时这里可以同步换成 `operationSchema`。
+  operation: z.string(),
+  target: z.string().nullable(),
+  probability: z.number(),
+  operationProbability: z.number(),
+  // 概率不校验 0~1 也不校验归一化：与 events.ts 一致地只校验类型——
+  // 引擎是否可能合法地给出未归一化的分布尚未定论（events.ts 的 TODO(P1)）。
+  confidence: z.number(),
+  distribution: z.enum(["full", "degenerate"]),
+  executed: z.boolean(),
+  blockReason: z.string().nullable(),
+  text: z.string().nullable(),
+  textEngine: z.string().nullable(),
+  urlBefore: z.string(),
+  urlAfter: z.string().nullable(),
+  // 三态：null 是「没能观测」，不是「没变化」。缺了 nullable 会让正常导航的报告读不出来。
+  pageChanged: z.boolean().nullable(),
+  engineLatencyMs: z.number().nonnegative(),
+  textLatencyMs: z.number().nonnegative(),
+  observedMs: z.number().nonnegative(),
+  frame: z.number().int().nonnegative().nullable(),
+  engineUsage: usageSchema,
+});
+
+const checkResultSchema = z.object({
+  passed: z.boolean(),
+  /** true = 无法求值，既不算通过也不算失败。报告里必须显示「跳过」 */
+  skipped: z.boolean(),
+  detail: z.string(),
+});
+
+const assertionResultSchema = z.object({
+  /**
+   * 三态。**不能写成 `z.boolean()`**：7 条通过、1 条被跳过时整体是 `null`（未判定），
+   * 判 true 就是 D9 要杜绝的谎报覆盖。
+   */
+  passed: z.boolean().nullable(),
+  // key 是稳定路径（`final.text.contains[0]`），前端靠它定位，因此是自由字符串而不是枚举。
+  checks: z.record(z.string(), checkResultSchema),
+});
+
+const admissionStatsSchema = z.object({
+  frames: z.number().int().nonnegative(),
+  crossOriginFrames: z.number().int().nonnegative(),
+  shadowRoots: z.number().int().nonnegative(),
+  canvases: z.number().int().nonnegative(),
+  passwordFields: z.number().int().nonnegative(),
+  fileInputs: z.number().int().nonnegative(),
+  nestedScrollContainers: z.number().int().nonnegative(),
+  interactiveElements: z.number().int().nonnegative(),
+});
+
+const admissionReportSchema = z.object({
+  ok: z.boolean(),
+  blocking: z.array(z.string()),
+  warnings: z.array(z.string()),
+  stats: admissionStatsSchema,
+});
+
+/**
+ * `CaseRunReport` 的校验器。
+ *
+ * 两个调用点：`core/report.ts` 的 `readReport()`（磁盘回读）与 `web/api.ts`
+ * 的 `/api/runs/:id` 响应。**校验失败必须报错而不是降级**——读不出来的报告
+ * 总比一份「看起来正常但实际错误」的报告好（同 `store/migrations.ts` 的第 2 条规则）。
+ */
+export const reportSchema: ZodType<CaseRunReport, CaseRunReport> = z.object({
+  schemaVersion: z.literal(1),
+
+  runId: z.string(),
+  caseId: z.string(),
+  caseRevision: z.number().int().nonnegative(),
+  caseDigest: z.string(),
+  suiteRunId: z.string().nullable(),
+  engine: z.string(),
+
+  startedAt: z.string(),
+  finishedAt: z.string(),
+  elapsedMs: z.number().nonnegative(),
+
+  status: runStatusSchema,
+  passed: z.boolean().nullable(),
+  failureReason: z.string().nullable(),
+
+  goal: z.string(),
+  startUrl: z.string(),
+  finalUrl: z.string().nullable(),
+
+  steps: z.array(stepRecordSchema),
+  guardrailHits: z.array(
+    z.object({
+      step: z.number().int().nonnegative(),
+      reason: z.string(),
+      action: z.string(),
+    }),
+  ),
+  assertion: assertionResultSchema.nullable(),
+  // 复用 events.ts 的 runStatsSchema：modelCalls 与 decisions 的口径
+  // （含/不含重试）必须与事件侧完全一致，各写一份迟早分叉。
+  stats: runStatsSchema,
+  admission: admissionReportSchema.nullable(),
+
+  artifacts: z.object({
+    traceZip: z.string().nullable(),
+    framesDir: z.string().nullable(),
+    frozenCase: z.string(),
+  }),
+});
+
+/**
+ * `RunIndexEntry` 的校验器。
+ *
+ * 与 `reportSchema` 分开而不是合成一个联合：`index.jsonl` 的一行与 `run.json`
+ * 是两份不同的文档，消费方也不同（列表页 vs 结果页）。
+ * 合成联合会让「列表页拿到了完整报告」这种错误结构通过校验。
+ */
+export const runIndexEntrySchema: ZodType<RunIndexEntry, RunIndexEntry> = z.object({
+  runId: z.string(),
+  caseId: z.string(),
+  caseTitle: z.string(),
+  suiteRunId: z.string().nullable(),
+  startedAt: z.string(),
+  status: runStatusSchema,
+  passed: z.boolean().nullable(),
+  elapsedMs: z.number().nonnegative(),
+  steps: z.number().int().nonnegative(),
+  // 与报告同一纪律：未知就是 null，不能用 0 冒充（§5）。
+  costUsd: z.number().nonnegative().nullable(),
+});
