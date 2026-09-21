@@ -6,6 +6,9 @@
 #
 # 这个文件同时是「格式规范 ↔ schema 实现」一致性的检查对象：
 # tests/schema.test.ts 会解析它、渲染成表单、再反解回对象，断言深度相等。
+#
+# 实测基线（真 TypeSafe + 真 Wikipedia，见 docs/architecture.md §11.3）：
+# 2 步 / 5 次决策（含 1 次重试）/ 6 次模型调用 / 33,859 input tokens / 5.6 秒。
 
 schemaVersion: 1
 id: wikipedia-godel
@@ -47,10 +50,13 @@ guardrails:
 # status: done 而 passed: false 是完全正常的组合。
 assertions:
   final:
-    # 推荐用 matches/contains 而非 equals：URL 带 query 时全等很脆。
+    # ⚠️ 别用非 ASCII 去断言 URL：浏览器会把路径里的非 ASCII **百分号编码**，
+    # `location.href` 拿到的是 `.../wiki/G%C3%B6del%27s_incompleteness_theorems`，
+    # 于是 `matches: ["Gödel"]` 永远不匹配（这一条是真跑踩出来的，不是推测）。
+    # 用 URL 里稳定的 ASCII 片段最省事——它同时也比 `equals` 抗 query 变化。
     url:
-      matches:
-        - "Gödel|Incompleteness"
+      contains:
+        - "incompleteness_theorems"
     text:
       contains:
         - incompleteness

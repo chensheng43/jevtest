@@ -165,7 +165,9 @@ test("cases/wikipedia-godel.yaml 能被解析，且字段与 YAML 逐条一致",
   assert.deepEqual(parsed.guardrails[0], { labelContains: "Create account", reason: "测试不允许创建账号" });
   assert.equal(parsed.guardrails[1]?.labelContains, "Donate");
 
-  assert.deepEqual(parsed.assertions.final?.url?.matches, ["Gödel|Incompleteness"]);
+  // URL 用 ASCII 片段断言：浏览器会把路径里的非 ASCII 百分号编码，
+  // 拿 `Gödel` 去匹配 URL **永远不匹配**（真跑踩出来的，见 docs/writing-cases.md 陷阱一）。
+  assert.deepEqual(parsed.assertions.final?.url?.contains, ["incompleteness_theorems"]);
   assert.deepEqual(parsed.assertions.final?.text?.contains, ["incompleteness"]);
   assert.deepEqual(parsed.assertions.final?.text?.notContains, ["Search results"]);
   assert.deepEqual(parsed.assertions.trajectory?.statusIn, ["done"]);
