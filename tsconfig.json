@@ -1,0 +1,35 @@
+{
+  // 基础配置：只做类型检查，不产出文件。
+  // 开发期用 `node --experimental-strip-types src/cli.ts` 直接跑 .ts，
+  // 因此这里必须开启 allowImportingTsExtensions，源码内一律写 `./foo.ts`。
+  "compilerOptions": {
+    "target": "ES2023",
+    "lib": ["ES2023"],
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "types": ["node"],
+
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+
+    // verbatimModuleSyntax 强制类型导入显式写 `import type`，
+    // 这是 Node 类型剥离能正确工作的前提。
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    // erasableSyntaxOnly 禁止 enum / namespace / 参数属性等无法被单纯擦除的语法，
+    // 保证源码永远可以被 `--experimental-strip-types` 直接执行。
+    "erasableSyntaxOnly": true,
+
+    // 源码内写 `./foo.ts`；tsc 产出时由 rewriteRelativeImportExtensions 改写成 `./foo.js`。
+    "allowImportingTsExtensions": true,
+    "rewriteRelativeImportExtensions": true,
+
+    "noEmit": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true
+  },
+  "include": ["src/**/*.ts", "tests/**/*.ts"]
+}

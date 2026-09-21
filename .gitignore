@@ -1,0 +1,20 @@
+# 依赖与构建产物
+node_modules/
+dist/
+
+# 凭证：绝不入库
+.env
+.env.local
+
+# 运行产物（报告、截图、trace）
+runs/
+*.log
+
+# Playwright trace 包
+trace.zip
+
+# 编辑器 / 系统
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
