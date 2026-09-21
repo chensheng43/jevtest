@@ -596,7 +596,389 @@ td.path {
 }
 
 /* =========================================================================
-   9. 动效
+   9. 交互件：面包屑、标签页、折叠、配方行
+   ========================================================================= */
+
+.crumbs {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.82rem;
+  color: var(--bs-secondary-color);
+  margin-bottom: 0.5rem;
+}
+
+.crumbs a {
+  color: var(--bs-secondary-color);
+  text-decoration: none;
+}
+
+.crumbs a:hover {
+  color: var(--bs-body-color);
+  text-decoration: underline;
+}
+
+.crumb-sep {
+  opacity: 0.5;
+}
+
+/* 上边距：结果页的标签栏紧跟在判决卡后面，不给一点间距会贴在卡片下边框上。 */
+.tabs-wrap {
+  margin-top: 0.75rem;
+}
+
+.tabs {
+  display: flex;
+  gap: 0.15rem;
+  border-bottom: 1px solid var(--bs-border-color);
+  overflow-x: auto;
+}
+
+/* 标签是 <button>：`appearance: none` 抹掉浏览器默认按钮样式，
+   再自己画下划线——这样深浅色都不用第二套配色。 */
+.tab {
+  appearance: none;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--bs-secondary-color);
+  padding: 0.45rem 0.75rem;
+  font-size: 0.9rem;
+  font-weight: 500;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.tab:hover {
+  color: var(--bs-body-color);
+}
+
+.tab.is-active {
+  color: var(--bs-body-color);
+  border-bottom-color: var(--bs-primary);
+}
+
+.tab:focus-visible {
+  outline: 2px solid var(--bs-primary);
+  outline-offset: -2px;
+}
+
+.tab-badge {
+  font-size: 0.7rem;
+  line-height: 1.5;
+  font-variant-numeric: tabular-nums;
+  color: var(--bs-secondary-color);
+  background: var(--bs-tertiary-bg);
+  border: 1px solid var(--bs-border-color);
+  border-radius: 999px;
+  padding: 0 0.35rem;
+}
+
+.tab-panel {
+  padding-top: 1rem;
+}
+
+.disclosure {
+  margin: 0.75rem 0;
+}
+
+.disclosure > summary {
+  cursor: pointer;
+  color: var(--bs-secondary-color);
+  font-size: 0.85rem;
+  padding: 0.2rem 0;
+  list-style: none;
+}
+
+.disclosure > summary::-webkit-details-marker {
+  display: none;
+}
+
+.disclosure > summary::before {
+  content: "▸ ";
+}
+
+.disclosure[open] > summary::before {
+  content: "▾ ";
+}
+
+.disclosure > summary:hover {
+  color: var(--bs-body-color);
+}
+
+/* 缩进 + 左侧细线：折叠内容与它上面那行说明的从属关系一眼可见。 */
+.disclosure-body {
+  padding: 0.5rem 0 0.25rem 0.75rem;
+  border-left: 2px solid var(--bs-border-color);
+}
+
+/* 断言配方：一句话 + 一个值 + 删除。整行是栅格，窄屏见 §11。 */
+.recipe-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.recipe-row {
+  display: grid;
+  grid-template-columns: minmax(9rem, 12rem) 1fr auto;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.35rem 0.5rem;
+  border: 1px solid var(--bs-border-color);
+  border-radius: var(--bs-border-radius);
+  background: var(--bs-body-bg);
+}
+
+.recipe-row.is-focused {
+  border-color: var(--bs-primary);
+}
+
+.recipe-sentence {
+  font-size: 0.88rem;
+}
+
+.recipe-add {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.7rem;
+  flex-wrap: wrap;
+}
+
+.recipe-add select {
+  max-width: 20rem;
+}
+
+/* 枚举多选（statusIn / forbiddenKinds）：封闭集合，勾选比手打可靠。 */
+.enum-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.1rem 0.6rem;
+}
+
+.enum-picker .form-check-inline {
+  margin: 0;
+}
+
+/* 原始行编辑器（配方覆盖不到的数组行）。 */
+.raw-row {
+  margin: 0.5rem 0 1rem;
+}
+
+.raw-row-label {
+  color: var(--bs-secondary-color);
+  font-size: 0.75rem;
+  margin-bottom: 0.2rem;
+}
+
+/* 行编辑器的列头。只有 placeholder 的输入框在敲下第一个字符之后就再也
+   看不出哪一列是什么了。 */
+.field-head {
+  font-size: 0.72rem;
+  color: var(--bs-secondary-color);
+  letter-spacing: 0.02em;
+}
+
+.field-head span:not(.field-head-gap) {
+  flex: 1 1 10rem;
+  min-width: 0;
+}
+
+.field-head-gap {
+  flex: 0 0 auto;
+  width: 2.2rem;
+}
+
+/* =========================================================================
+   10. 编辑器的动作条与保存前的提示
+   ========================================================================= */
+
+.form-warnings > .alert {
+  margin: 0.6rem 0;
+  font-size: 0.88rem;
+}
+
+/*
+ * 「有未保存的修改」。用**实**框的琥珀色：D9 里「跳过」用的是**虚**框琥珀，
+ * 两者形状不同，不会被读成同一件事。
+ */
+.dirty-badge {
+  font-size: 0.75rem;
+  color: var(--bs-warning-text-emphasis);
+  background: var(--bs-warning-bg-subtle);
+  border: 1px solid var(--bs-warning-border-subtle);
+  border-radius: 999px;
+  padding: 0.1rem 0.5rem;
+  white-space: nowrap;
+}
+
+/*
+ * 动作条吸底：表单很长，保存不该需要先滚回顶部。
+ *
+ * 底色**不透明、也不做毛玻璃**：吸底元素底下本来就压着内容，
+ * 半透明 + blur 会把它糊成一片看着像渲染坏了的东西。实底看起来是
+ * 「一条工具栏」，压着什么是清楚的。`main` 的 5rem 下边距保证滚到底时
+ * 最后一行内容在它上面，不会被永久盖住。
+ */
+.form-actions {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  margin-top: 1.25rem;
+  padding: 0.75rem 0;
+  border-top: 1px solid var(--bs-border-color);
+  background: var(--bs-body-bg);
+  z-index: 10;
+}
+
+.form-actions-main,
+.form-actions-aside {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.req {
+  color: var(--bs-danger);
+  margin-left: 0.15rem;
+}
+
+.field-error {
+  color: var(--bs-danger-text-emphasis);
+  font-size: 0.78rem;
+  margin-top: 0.15rem;
+}
+
+.payload {
+  max-height: 24rem;
+  overflow: auto;
+  padding: 0.75rem;
+  background: var(--bs-tertiary-bg);
+  border: 1px solid var(--bs-border-color);
+  border-radius: var(--bs-border-radius);
+  font-size: 0.78rem;
+}
+
+/* alert 的关闭按钮是手写的（Bootstrap 那个要 bootstrap.js）。 */
+.alert-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.alert-close {
+  appearance: none;
+  background: none;
+  border: none;
+  padding: 0 0.2rem;
+  color: inherit;
+  opacity: 0.6;
+  font-size: 1.1rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.alert-close:hover {
+  opacity: 1;
+}
+
+/* =========================================================================
+   11. 列表页（用例 / 运行历史）与导入页
+   ========================================================================= */
+
+/* 列表不再是「一列一个字段」：主行是名字，次要信息退到次行的灰字里。 */
+.row-title {
+  font-weight: 550;
+  text-decoration: none;
+}
+
+.row-title:hover {
+  text-decoration: underline;
+}
+
+.row-meta {
+  color: var(--bs-secondary-color);
+  font-size: 0.78rem;
+}
+
+.col-actions {
+  white-space: nowrap;
+  text-align: right;
+}
+
+/* 行内的「更多」折叠要贴着按钮，不要继承 .disclosure 的上下外边距。 */
+.list-table .disclosure {
+  margin: 0.3rem 0 0;
+}
+
+.list-table .disclosure > summary {
+  font-size: 0.78rem;
+  padding: 0;
+}
+
+.list-footer {
+  display: flex;
+  justify-content: center;
+  margin-top: 0.75rem;
+}
+
+/*
+ * 失败的断言行：一层淡红底，让它在十几行检查里一眼可见。
+ * 这**不参与** D9 的三态表达——三态仍由 .badge--* 唯一决定，
+ * 这里的底色只是「这一行值得先看」。
+ */
+tr.row-failed > td {
+  background: var(--bs-danger-bg-subtle);
+}
+
+.drop-zone {
+  border: 1px dashed var(--bs-border-color);
+  border-radius: var(--bs-border-radius);
+  padding: 1rem;
+  margin-bottom: 1rem;
+  text-align: center;
+  background: var(--bs-body-bg);
+}
+
+.drop-zone.is-dragging {
+  border-color: var(--bs-primary);
+  background: var(--bs-tertiary-bg);
+}
+
+.entry-choice {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.entry-choice-item {
+  border: 1px solid var(--bs-border-color);
+  border-radius: var(--bs-border-radius);
+  padding: 0.9rem 1rem;
+  background: var(--bs-body-bg);
+}
+
+.entry-choice-item.is-active {
+  border-color: var(--bs-primary);
+}
+
+.entry-choice-item p {
+  margin-bottom: 0.5rem;
+}
+
+/* =========================================================================
+   12. 动效
    ========================================================================= */
 
 @keyframes pulse {
@@ -633,7 +1015,7 @@ td.path {
 }
 
 /* =========================================================================
-   10. 窄屏
+   13. 窄屏
    ========================================================================= */
 
 @media (max-width: 640px) {
@@ -652,5 +1034,21 @@ td.path {
 
   .stat-row {
     grid-template-columns: repeat(2, 1fr);
+  }
+
+  /* 配方行折成两行：句子独占一行，值 + 删除在第二行——
+     三列在窄屏下会把输入框挤到只剩几十像素。 */
+  .recipe-row {
+    grid-template-columns: 1fr auto;
+  }
+
+  .recipe-sentence {
+    grid-column: 1 / -1;
+  }
+
+  /* 动作条在窄屏不再吸底：宽度不够时它会盖住内容，而窄屏上的表单一屏也滚不完。 */
+  .form-actions {
+    position: static;
+    background: none;
   }
 }
