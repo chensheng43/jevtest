@@ -287,26 +287,35 @@ test("请求形状：一次带全部问题、rules 与元素表原样下发、bu
     ["operation", "click_target", "type_text_target"],
     "questions 的键就是 Question.key（<operation>_target 小写），中间不做第二次改名",
   );
-  assert.deepEqual(body["questions"]["operation"].criteria.options, [
-    { id: "CLICK", label: "CLICK" },
-    { id: "TYPE_TEXT", label: "TYPE_TEXT" },
-    { id: "DONE", label: "DONE" },
-  ]);
-  assert.deepEqual(body["questions"]["operation"].instructions, { prompt: NEXT_ACTION, rules: [NEXT_ACTION] });
+  // criteria 是**以候选 id 为键的对象**，不是候选数组（上游 model.py:96-115 的形状）。
+  // operation 问题的值是一句操作说明；target 问题的值是 {element, current_value, ...}。
+  assert.deepEqual(body["questions"]["operation"].criteria, {
+    CLICK: "CLICK",
+    TYPE_TEXT: "TYPE_TEXT",
+    DONE: "DONE",
+  });
+  assert.deepEqual(body["questions"]["click_target"].criteria, {
+    "1": { element: "[1] link Gödel", current_value: "" },
+    "2": { element: "[2] link Escher", current_value: "" },
+  });
+  // instructions：operation 问题的 rules 是**字符串**，target 问题是**数组**。
+  // 这个不对称不是笔误，上游就是这样——照抄比「统一一下」安全。
+  assert.deepEqual(body["questions"]["operation"].instructions, {
+    goal: "在 Wikipedia 上打开 Gödel 的条目",
+    rules: NEXT_ACTION,
+  });
+  assert.deepEqual(body["questions"]["click_target"].instructions, {
+    goal: "在 Wikipedia 上打开 Gödel 的条目",
+    operation: "CLICK",
+    rules: [NEXT_ACTION, TARGET],
+  });
   assert.deepEqual(body["state"]["elements"], request.state.elements);
   assert.deepEqual(body["state"]["recent_actions"], [
     { action: "CLICK [12] link Wikipedia", kind: "click", text: null, page_changed: true },
   ]);
-  assert.deepEqual(body["budget"], {
-    steps_used: 2,
-    max_steps: 40,
-    model_calls_used: 3,
-    max_model_calls: 40,
-    input_tokens_used: 1000,
-    max_input_tokens: 200_000,
-    elapsed_ms: 4000,
-    max_elapsed_ms: 300_000,
-  });
+  // 顶层只有这三个键。BudgetView 不进请求体——多一个键就是给一个严格校验的
+  // 服务端多一个拒绝的理由，而它只回一句 Invalid request.，排查代价全在我们这侧。
+  assert.deepEqual(Object.keys(body).sort(), ["model", "questions", "state"]);
   await engine.close();
 });
 
@@ -316,15 +325,15 @@ test("detail 不能盖掉 code-owned 的 id / label", async (t) => {
   const endpoint = await startEndpoint(t, () => ({ status: 200, json: okBody() }));
   const engine = createTypeSafeEngine(engineOptions(endpoint.endpoint));
   const request = decisionRequest();
-  request.questions[1]!.options[0]!.detail = { id: "evil", label: "evil", kind: "click" };
+  request.questions[1]!.options[0]!.detail = { id: "evil", label: "evil", element: "evil", current_value: "evil" };
 
   await engine.decide(request, new AbortController().signal);
 
   const body = endpoint.requests[0]?.body as Record<string, any>;
-  assert.deepEqual(body["questions"]["click_target"].criteria.options[0], {
-    kind: "click",
-    id: "1",
-    label: "[1] link Gödel",
+  // 键是 option.id、element 是 option.label——detail 里同名或相似名的键都盖不掉它们。
+  assert.deepEqual(body["questions"]["click_target"].criteria, {
+    "1": { element: "[1] link Gödel", current_value: "" },
+    "2": { element: "[2] link Escher", current_value: "" },
   });
   await engine.close();
 });

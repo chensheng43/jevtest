@@ -34,7 +34,7 @@
  *      代价未知时 `costUsd` 记 null。概率类断言一旦建立在编出来的分布上就是假通过。
  */
 
-import type { BudgetView, DecisionEngine, DecisionRequest, DecisionResult, Question, TextRequest, TextResult } from "./types.ts";
+import type { BudgetView, DecisionEngine, DecisionRequest, DecisionResult, Option, Question, TextRequest, TextResult } from "./types.ts";
 import type { Answer } from "./types.ts";
 import type { Usage } from "../schema/report.ts";
 import { TEXT_VALUE } from "../core/rules.ts";
@@ -246,30 +246,66 @@ function buildDecisionBody(model: string, req: DecisionRequest): Record<string, 
         page_changed: entry.pageChanged,
       })),
     },
-    questions: Object.fromEntries(req.questions.map((q) => [q.key, toQuestionPayload(q, req.rules)])),
-    budget: {
-      steps_used: req.budget.stepsUsed,
-      max_steps: req.budget.maxSteps,
-      model_calls_used: req.budget.modelCallsUsed,
-      max_model_calls: req.budget.maxModelCalls,
-      input_tokens_used: req.budget.inputTokensUsed,
-      max_input_tokens: req.budget.maxInputTokens,
-      elapsed_ms: req.budget.elapsedMs,
-      max_elapsed_ms: req.budget.maxElapsedMs,
+    questions: Object.fromEntries(req.questions.map((q) => [q.key, toQuestionPayload(q, req)])),
+    // 只发这三个顶层键。`BudgetView` **不进请求体**——它只用于本地裁剪上下文
+    // （见 trimPageText）：上游的 body 恰好是 model / state / questions 三个键，
+    // 多一个就是给一个严格校验的服务端多一个拒绝的理由，而它有且只有一个
+    // 模糊的报错（Invalid request.），排查代价全在我们这一侧。
+  };
+}
+
+/**
+ * 一个问题的载荷。**形状照搬 `model.py:96-115`，一处不改。**
+ *
+ * 两个容易想当然的地方：
+ *   - `criteria` 是**以候选 id 为键的对象**，不是候选数组。operation 问题的值是一句
+ *     操作说明（字符串），target 问题的值是一个对象（`element` + `current_value` + 属性）。
+ *   - `instructions.rules` 在 operation 问题上是**字符串**，在 target 问题上是**数组**
+ *     （`[NEXT_ACTION, TARGET]`）。这不是笔误，上游就是这样。
+ *
+ * 这两条差别曾让我们付出一次真跑的代价：请求体形状不对时服务端只回
+ * `400 api_usage_error: Invalid request.`，既不说是哪个字段，也不像认证错误那样
+ * 好定位——而假 key 会回 401，所以「认证过了」并不代表「请求对」。
+ */
+function toQuestionPayload(question: Question, req: DecisionRequest): Record<string, unknown> {
+  const isOperation = question.key === "operation";
+  return {
+    type: "choice",
+    criteria: Object.fromEntries(
+      question.options.map((option) => [
+        option.id,
+        isOperation ? option.label : targetCriteriaValue(option),
+      ]),
+    ),
+    instructions: {
+      goal: req.goal,
+      ...(isOperation ? {} : { operation: operationOfQuestion(question.key) }),
+      // operation 问题：上游只给共享规则（字符串）；target 问题：共享规则 + TARGET。
+      rules: isOperation ? question.prompt : [...req.rules, question.prompt],
     },
   };
 }
 
-function toQuestionPayload(question: Question, rules: string[]): Record<string, unknown> {
-  return {
-    type: "choice",
-    criteria: {
-      // detail 展开在前、id/label 放在后：附加属性不能覆盖掉这两个 code-owned 字段
-      // （它们是模型唯一能回传的东西，被覆盖就等于把选择权交给了页面里的文本）。
-      options: question.options.map((option) => ({ ...option.detail, id: option.id, label: option.label })),
-    },
-    instructions: { prompt: question.prompt, rules },
+/** `<operation>_target` -> `CLICK` / `TYPE_TEXT` / `SELECT`。 */
+function operationOfQuestion(key: string): string {
+  return key.replace(/_target$/, "").toUpperCase();
+}
+
+/** target 候选的值：上游是 `{element, current_value, role/checked/selected/expanded?}`。 */
+function targetCriteriaValue(option: Option): Record<string, unknown> {
+  const detail = option.detail;
+  const value = detail["value"];
+  const criteria: Record<string, unknown> = {
+    element: option.label,
+    current_value: typeof value === "string" ? value : "",
   };
+  // 只带上确实存在的属性：`null` 与 `""` 会被当成「这个字段有值」，
+  // 而模型的判断依据是「有没有这个属性」。
+  for (const key of ["role", "checked", "selected", "expanded"] as const) {
+    const attribute = detail[key];
+    if (attribute !== undefined && attribute !== null && attribute !== "") criteria[key] = attribute;
+  }
+  return criteria;
 }
 
 function trimPageText(text: string, budget: BudgetView): string {

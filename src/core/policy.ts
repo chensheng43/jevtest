@@ -24,7 +24,7 @@ import type { Answer, BudgetView, DecisionRequest, DecisionResult, ElementIR, Qu
 import type { Action, Observation } from "../browser/session.ts";
 import type { StepRecord } from "../schema/report.ts";
 import { InvalidDecision } from "./errors.ts";
-import { NEXT_ACTION, TARGET } from "./rules.ts";
+import { NEXT_ACTION, OPERATION_DESCRIPTIONS, TARGET } from "./rules.ts";
 
 /** 单次观测最多保留多少候选。超出部分被丢弃且**不可被选中**。 */
 export const MAX_ACTIONS = 250;
@@ -386,7 +386,15 @@ function buildQuestions(space: ActionSpace): Question[] {
       key: "operation",
       // 上游把同一份 NEXT_ACTION 规则同时传给操作问题与目标问题（`model.py:92,105`）。
       prompt: NEXT_ACTION,
-      options: operations.map((operation) => ({ id: operation, label: operation, detail: {} })),
+      options: operations.map((operation) => ({
+        id: operation,
+        // 候选的 label 就是**发给模型的操作说明**：上游把 `criteria` 做成
+        // 「操作 id → 一句英文说明」。只给一个 `CLICK` 而让模型自己去猜它包含什么，
+        // 是这个形状最容易退化的一处（见 rules.ts 的 OPERATION_DESCRIPTIONS）。
+        // 页面级操作用控件自己的标签——snapshot.js 给的本来就是英文。
+        label: OPERATION_DESCRIPTIONS[operation] ?? space.controls[operation]?.label ?? operation,
+        detail: {},
+      })),
     },
   ];
 
