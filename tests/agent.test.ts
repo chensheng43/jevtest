@@ -191,6 +191,46 @@ test("不变量 4（输入前复查）：陈旧的输入决策既不生成文本
   assert.equal(stepAt(report, 0).executed, true);
 });
 
+test("act 抛 StalePage（输入前的新鲜度复查）时：决策作废、重新观测，而不是判成运行故障", async () => {
+  // 这条来自一次真跑：往 Wikipedia 的搜索框输入之后，页面自己开始渲染候选列表，
+  // 于是「决策作出」与「输入」之间那几十毫秒里页面就变了，act 的新鲜度复查立刻
+  // 抛 StalePage。而它此前会把整轮运行判成 error——一次**没有产生任何副作用**的
+  // 决策作废，被记成了基建故障。
+  //
+  // 前提是 act 抛出的 StalePage / OccludedTarget 都发生在输入之前
+  // （输入后的 settle 刻意吞异常，见 playwright-session.ts）。这条测试同时
+  // 锁住那个前提的**使用方式**：只重新观测、绝不重放这次动作。
+  const pageA = richPage({ fingerprint: "fp-a" });
+  const pageB = richPage({ fingerprint: "fp-b" });
+  let actThrows = true;
+
+  const session = new FakeSession({
+    observations: [pageA, pageB],
+    onAct: () => {
+      if (actThrows) {
+        actThrows = false;
+        throw new StalePage("动作 e4（Search）所依据的页面状态已经变化，已放弃执行");
+      }
+    },
+  });
+  const engine = createScriptedEngine({
+    steps: [{ operation: { choice: "CLICK" }, targets: { click_target: { choice: "1" } } }, done()],
+  });
+
+  const { report, events } = await runCase({ caseDef: makeCase(), session, engine });
+
+  assert.equal(report.status, "done", "作废一次之后应当继续跑完，而不是以 error 收场");
+  assert.equal(session.actCount, 1, "act 只被调用一次：作废不等于重试（§6.2）");
+  assert.equal(report.steps.length, 0, "没有执行过的动作不能进轨迹——那会让报告说谎");
+  assert.equal(eventsOf(events, "step.skipped").length, 1, "作废要留下 step.skipped 的痕迹");
+  // 用 find 而不是 eventsOf：它是判别联合，TS 会按 `type` 收窄，`.reason` 才可访问。
+  const skipped = events.find((event) => event.type === "step.skipped");
+  assert.ok(skipped !== undefined);
+  assert.match(skipped.reason, /未执行|未收到任何输入/);
+  // 起始页由 goto 给出（不计入 observeCalls），所以「重新观测一次」就是 1。
+  assert.equal(session.observeCalls, 1, "作废之后必须重新观测一次");
+});
+
 // ---------------------------------------------------------------------------
 // 不变量 2 + 3：变更不重试 / 先记日志再观测
 // ---------------------------------------------------------------------------

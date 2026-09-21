@@ -70,7 +70,7 @@ import type { Action, Observation, Session } from "../browser/session.ts";
 import type { BudgetMeter } from "./budget.ts";
 import type { Resolved } from "./policy.ts";
 
-import { GuardrailBlocked, StalePage } from "./errors.ts";
+import { GuardrailBlocked, OccludedTarget, StalePage } from "./errors.ts";
 import { admit } from "../browser/admission.ts";
 import { assertAllowedOrigin, checkAction } from "./guard.ts";
 import {
@@ -386,8 +386,39 @@ export class CaseAgent {
 
       // ---- 10. 执行：**绝不重试** -----------------------------------------
       // 动作可能已经生效，只是我们没看到结果；重试就是执行两次。
-      // 因此这里没有 try/catch、没有退避、没有重放。
-      await session.act(resolved.action, page, text);
+      // 因此这里没有退避、没有重放。
+      try {
+        await session.act(resolved.action, page, text);
+      } catch (error) {
+        // 这个 catch **不是**重试，而是「这次决策作废」——两者必须分清。
+        //
+        // act() 抛出的 StalePage / OccludedTarget **一定发生在输入之前**：
+        // 新鲜度复查与几何命中测试都在发鼠标/键盘事件之前，而输入之后的 settle
+        // 刻意吞掉异常（见 playwright-session.ts 的 act，那里有详细理由）。
+        // 也就是说此刻浏览器**一个字节都没收到**，这次决策没有任何副作用——
+        // 按 §6.4「废弃的决策不产生副作用」，正确反应是丢掉它、重新观测、重新决策，
+        // 而不是把整轮运行判成运行故障。
+        //
+        // 真实场景里这条路径很常见：往搜索框输入会触发页面自己渲染候选列表，
+        // 于是「决策作出」与「输入」之间那几十毫秒里页面就变了。
+        //
+        // ⚠️ 这条处理的正确性**依赖 act() 的抛出顺序**。若将来把某个「输入之后」的
+        // 失败也抛成 StalePage，这里就会把一个已经生效的动作当成没发生——
+        // 那正是 §6.2 要防的双执行。改 act 的抛出点时必须回来一起看这里。
+        if (error instanceof StalePage || error instanceof OccludedTarget) {
+          events.emit({
+            type: "step.skipped",
+            runId: this.runId,
+            step: this.step,
+            reason:
+              `${error instanceof StalePage ? "陈旧" : "目标已不可用"}：${error.message}` +
+              `——动作未执行（浏览器未收到任何输入），重新观测后重新决策`,
+          });
+          this.page = await this.observeOnce();
+          continue loop;
+        }
+        throw error;
+      }
       // 变更成功 -> 页面已不同 -> 为旧页面生成的文本不再可信
       this.textCache.clear();
 

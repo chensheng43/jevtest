@@ -85,6 +85,15 @@ export const REQUIRE_FOCUS_EMULATION = false;
 export const SETTLE_MS = { default: 50, combobox: 200 } as const;
 
 /**
+ * 「新文档尚未就绪」时等它多久。
+ *
+ * 只用于导航在途的那个窗口：真实的 DOMContentLoaded 通常几十到几百毫秒就到，
+ * 超过这个值说明这次导航本身有问题，那就该让观测如实失败（StalePage），
+ * 而不是把每一步都拖长。
+ */
+export const DOCUMENT_READY_TIMEOUT_MS = 2_000;
+
+/**
  * 滚轮事件发送的位置。参考项目固定在 (550, 650)（见 docs/limitations.md §6），
  * 这里保持一致，便于对照行为。视口比它小时 Playwright 仍会照发，不会报错。
  */
@@ -572,13 +581,45 @@ export function createPlaywrightSession(options: PlaywrightSessionOptions): Sess
     // ObserveOptions.screenshot 在本实现里没有落点：Observation（冻结契约）没有
     // 承载画面的字段，需要画面时调用方另外调 frameJpeg()。见报告「契约矛盾」一节。
     await settle(SETTLE_MS.default, "document");
-    const raw = await readState();
+    let raw = await readState();
     if (raw === null || typeof raw !== "object") {
-      throw new JevtestError(
-        "页面还没有 body，snapshot.js 拒绝了这次读取（它只认 document.body 已存在的文档）",
-      );
+      // `snapshot.js` 只认 `document.body` 已存在的文档，因此 null 的含义是
+      // **「这个页面现在读不了」**，不是「这个页面坏了」：典型场景是导航在途
+      // ——旧文档已卸载、新文档还没解析出 body。
+      //
+      // 真跑实测会命中这里：点搜索/提交这类动作之后紧接的那次观测，常常正好落在
+      // 那个窗口里，而它此前被当成运行故障（整轮运行判 error）。
+      // 观测是**纯读**，所以等待与重试在这个位置是安全的——「浏览器变更从不重试」
+      // 约束的是 act（动作可能已经生效，重试就是执行两次），不是读。
+      await waitForDocumentReady();
+      raw = await readState();
+    }
+    if (raw === null || typeof raw !== "object") {
+      // 等过文档就绪仍然读不到：归成 StalePage，而不是致命错误。
+      // 「读不到这个页面」在语义上就是「这次观测所依据的页面已经不在了」，
+      // 而调用方对 StalePage 的既有处理正是正确的反应
+      // （动作之后 → 记 `pageChanged: null`；决策之前 → 下一轮重新观测）。
+      throw new StalePage("页面当前不可读：document.body 尚未就绪，或文档正在被替换");
     }
     return toObservation(raw);
+  }
+
+  /**
+   * 等当前文档进入可读状态（DOMContentLoaded）。
+   *
+   * 超时与失败**都吞掉**：它只是给随后那次重读一个更好的机会，不该由它来决定
+   * 这次观测的成败——重读仍然读不到时，由 `observe` 判成 StalePage。
+   * 超时值取得很短是刻意的：调用方要的是「现在能不能读」，而不是「等到能读为止」。
+   */
+  async function waitForDocumentReady(): Promise<void> {
+    try {
+      await page.waitForLoadState("domcontentloaded", { timeout: DOCUMENT_READY_TIMEOUT_MS });
+    } catch {
+      // 导航失败、被取消、或超出短超时：交给下面的重读去判。
+      return;
+    }
+    // 刚就绪的文档常常还在解析首个脚本，再给两帧让 body 里的元素落地。
+    await settle(SETTLE_MS.default, "document");
   }
 
   async function settle(ms: number, mode: "document" | "combobox"): Promise<void> {

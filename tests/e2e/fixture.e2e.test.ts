@@ -302,6 +302,23 @@ e2e("probe：准入统计能在真页面上采集（含原生 select 与复选�
   });
 });
 
+e2e("导航在途时观测：等文档就绪，而不是把「读不到」判成运行故障", async () => {
+  // 这条来自一次真跑：点「Search」提交后跳转到新文档，而动作之后紧接的那次观测
+  // 正好落在「旧文档已卸载、新文档还没 body」的窗口里，snapshot.js 于是返回 null，
+  // 整轮运行被判成 error。
+  //
+  // 用 `waitUntil: "commit"` 让这个窗口**确定性地**出现：页面刚提交、DOM 还没解析，
+  // 此时 document.body 必定不存在。修好之前，下面这一行会直接抛错。
+  await wiring.pool.withSession({ tracing: false }, async (session) => {
+    const page = await session.goto(`${fixture.url}/index.html${KEEP_TRAPS}`, {
+      waitUntil: "commit",
+    });
+    assert.match(page.url, /\/index\.html/, "观测到的应当是那份已提交的新文档");
+    assert.ok(page.actions.length > 0, "等到文档就绪之后，元素表必须是有内容的");
+    assert.ok(page.text.length > 0, "可见文本同样应当读到了");
+  });
+});
+
 // ---------------------------------------------------------------------------
 // 全链路：搜索流程
 // ---------------------------------------------------------------------------
