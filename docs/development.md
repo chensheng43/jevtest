@@ -24,6 +24,13 @@ cp .env.example .env                 # 填 TYPESAFE_API_KEY
 | `playwright` | `^1.49.0` | 1.63.0 | 浏览器层 |
 | `zod` | `^4.0.0` | 4.6.5 | schema 校验，前后端共享 |
 | `yaml` | `^2.6.0` | 2.9.1 | 用例文件 |
+| `bootstrap` | `^5.3.8` | 5.3.8 | **只在浏览器里跑**，走 `/vendor/` 直接引 |
+
+`bootstrap` 是唯一一个不进 Node 进程的依赖：`index.html` 用
+`/vendor/bootstrap/dist/css/bootstrap.min.css` 直接从 `node_modules` 引它，
+不经过任何打包器（见 `server.ts` 的 `/vendor/*` 路由与 `security.ts` 的
+`VENDOR_EXTENSIONS`）。它由 `--bs-*` 这套 CSS 变量提供配色，深色模式因此
+是白拿的——`style.css` 里不需要第二套色值。
 
 开发依赖只有 `typescript` 与 `@types/node`。
 
@@ -237,8 +244,9 @@ const next = await session.observe();     // 后
 | --- | --- |
 | 注释写"为什么"，不写"是什么" | 代码本身能说明做什么；注释的价值在于记录**为什么这样而不是那样** |
 | 移植来的代码标注来源 | 文件头写明来源与 MIT 署名，详见 [`NOTICE`](../NOTICE) |
-| 不引入前端构建工具链 | 原生 HTML/CSS/JS。`tsc` 是编译器，不算打包器 |
-| 后端依赖控制在 3 个 | 加依赖前先问"手写要多少行" |
+| 不引入前端构建工具链 | 原生 HTML/CSS/JS。`tsc` 是编译器，不算打包器。前端库走 `/vendor/` 从 `node_modules` 直引，仍然不打包 |
+| 后端依赖控制在 3 个 | 加依赖前先问"手写要多少行"。浏览器侧依赖（`bootstrap`）不算在内，它不进 Node 进程 |
+| 前端只做展示，不做判断 | 三态怎么显示由 `style.css` 决定，但**哪一态**由 `app.js` 的 `passedBadge` / `verdictBadge` 唯一决定。D9/D8 的视觉区分由 `tests/frontend.test.ts` 守着 |
 | 错误信息给人看 | 说清原因和怎么修，不要只抛 `Error: failed` |
 | 字符串联合类型代替 `enum` | `erasableSyntaxOnly` 要求 |
 
