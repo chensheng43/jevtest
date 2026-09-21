@@ -17,7 +17,7 @@ npx playwright install chromium      # 约 150MB，首次需要
 cp .env.example .env                 # 填 TYPESAFE_API_KEY
 ```
 
-运行时依赖刻意只有 3 个：
+运行时依赖刻意保持在少数几个：
 
 | 包 | `package.json` 声明 | 脚手架验证时解析到 | 用途 |
 | --- | --- | --- | --- |

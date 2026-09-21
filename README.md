@@ -250,14 +250,15 @@ TypeSafe 给出真实概率分布；通用 LLM 通常只回一个选择，合成
 | `jevtest validate cases/wikipedia-godel.yaml` | 解析 + 默认值填充 + 内部自洽检查全部通过 |
 | `jevtest import cases/wikipedia-godel.yaml` | 落盘为 `cases/wikipedia-godel/case.yaml`，revision 1，digest 稳定 |
 | 真浏览器全链路（e2e） | 观测 → 决策 → 执行 → 断言 → 报告落盘 + trace.zip；护栏命中时 `executed: false` 且页面处理器未跑；`contextsActive` 归零 |
+| **真 TypeSafe + 真 Wikipedia 跑 `cases/wikipedia-godel.yaml`** | `done` + `passed: true`（10/10 断言），2 步 / 6 次模型调用 / 33,859 input tokens / 约 5 秒。基线数据与抓到的三个缺陷见 [`architecture.md §11.3`](docs/architecture.md) |
 
-**尚未实测的（需要真凭证，会花钱）：**
+**尚未实测的：**
 
 | 未做 | 原因 |
 | --- | --- |
-| `jevtest run cases/wikipedia-godel.yaml` 真跑 | 该用例要往搜索框输入（`TYPE_TEXT`），而 `.env` 里的 `TEXT_MODEL_API_KEY` 是空的——按设计它会**直接报错而不是猜一个值**（这正是 `docs/architecture.md §11.1 ④`/`engine/text.ts` 的纪律）。填上 DeepSeek key 即可跑 |
-| `jevtest serve` 端到端手测 | 服务已能起（`doctor` 里的 `/api/health` 走的是同一个 handler），但界面尚未人工点过 |
-| `docs/architecture.md §11.3` 的耗时/成本基线 | 依赖上一条。参考值：上游同类任务 17 次请求、90,558 input tokens |
+| `jevtest serve` 端到端手测 | 服务与 API 已实测（`doctor` 走同一个 handler，`tests/api.test.ts` 24 项覆盖路由与三道闸），但界面尚未人工点过 |
+| 除种子用例之外的真跑 | 目前**只有一个用例**过了真跑这道闸——含下拉、复选框、断言更严的用例都还没跑过 |
+| TypeSafe 是否报金额 | 实测没有：响应里没有金额字段，因此成本类断言在真引擎下是 skipped。要按金额设上限得先补这个映射 |
 
 ## 接下来做什么
 
@@ -265,7 +266,7 @@ TypeSafe 给出真实概率分布；通用 LLM 通常只回一个选择，合成
 
 | # | 事项 | 为什么排这个位置 |
 | --- | --- | --- |
-| 1 | **填 `TEXT_MODEL_API_KEY`，真跑 5 次 `cases/wikipedia-godel.yaml`** | 见下方「验证闸」。全部接口都建立在「上游 7.1 秒跑完 Google Flights」这一个数据点上，而本项目换了浏览器层、加了断言与护栏——**实测过之前，没有任何人知道这些默认值合不合理** |
+| 1 | **再写 2~3 个真用例并跑通**（含下拉、复选框、更严的断言） | 验证闸已经过了，但**只有一个用例**过了——它的路径是「输入 + 点自动补全」，没有覆盖下拉、复选框、陷阱元素在真站点上的行为。基线数据见 [`architecture.md §11.3`](docs/architecture.md) |
 | 2 | 人工点一遍 `jevtest serve` | 服务与 API 已实测（`doctor` 走同一个 handler、`tests/api.test.ts` 24 项覆盖路由与三道闸），但没有人在真浏览器里点过界面。前端是唯一「测过逻辑、没人看过样子」的模块 |
 | 3 | 截图通路（`recordFrames`） | `StepRecord.frame` 与 `framesDir` 恒为 null。事件里只带 `frame` 序号的设计已经就位，缺的是 runner→agent 的接线（`browser/session.ts` 的 `frameJpeg()` 是现成的） |
 | 4 | `toJUnit` | `core/report.ts` 里仍是 stub，`GET /api/runs/:id/export?format=junit` 明确回 501。CI 集成前必须有 |
@@ -328,9 +329,12 @@ schema/case.ts
 每 context 隔离的成本、两个信号量的取值——都建立在「上游 7.1 秒跑完 Google Flights」
 这**一个**数据点上（[architecture.md §11.3](docs/architecture.md) 自己也记着「未实测」）。
 
-**这道闸目前还没过**（见 [当前进度](#当前进度)）：`.env` 里的 `TEXT_MODEL_API_KEY` 是空的，
-而这个用例要往搜索框输入。填上 key 之后的第一件事就是跑它——**接口是在没有实测数据的情况下
-定型的**，这是当前最大的一处技术债，比任何 TODO 都值得优先处理。
+**这道闸已经过了**（2026-09-21，真 TypeSafe + 真 Wikipedia）：`done` + `passed: true`，
+2 步 / 6 次模型调用 / 33,859 input tokens / 约 5 秒。过程中抓到三个离线测试看不见的真缺陷
+（请求体形状不对、`act` 的陈旧决策被误判成运行故障、导航在途时观测被判失败），
+每一个都补了回归测试，详见 [`architecture.md §11.3`](docs/architecture.md)。
+
+闸门本身仍然值得定期重跑：它验的不是「代码能跑」，而是**接口定型的那些假设还成不成立**。
 
 ```bash
 npm run dev -- run cases/wikipedia-godel.yaml        # 跑一次并输出报告

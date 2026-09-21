@@ -112,6 +112,27 @@ final:
 URL 里常有无关的追踪参数、会话 id、排序参数。
 全等断言会在第一次站点改动时碎掉，且碎得没有意义。
 
+**陷阱一的变体：拿非 ASCII 去断言 URL（真跑踩出来的）。**
+
+```yaml
+# 差：浏览器会把路径里的非 ASCII **百分号编码**
+final:
+  url:
+    matches: ["Gödel"]
+
+# 好：用 URL 里稳定的 ASCII 片段
+final:
+  url:
+    contains: ["incompleteness_theorems"]
+```
+
+`location.href` 给出的是 `.../wiki/G%C3%B6del%27s_incompleteness_theorems`，
+所以 `matches: ["Gödel"]` **永远不匹配**，而页面明明已经对了。
+中文标题、带撇号的条目名、带空格的查询串都会踩这条。
+
+页面上要用非 ASCII 断言没问题（`final.text.contains` 拿的是可见文本，不经过编码）；
+只有 URL 需要 ASCII 片段。参考用例 `cases/wikipedia-godel.yaml` 就是这么写的。
+
 ### 陷阱二：断言太严，把实现细节当成了需求
 
 ```yaml
