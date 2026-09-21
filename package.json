@@ -16,7 +16,8 @@
     "build": "tsc -p tsconfig.build.json && node scripts/copy-assets.mjs",
     "typecheck": "tsc --noEmit",
     "test": "node --experimental-strip-types --test \"tests/**/*.test.ts\"",
-    "doctor": "node --experimental-strip-types src/cli.ts doctor"
+    "doctor": "node --experimental-strip-types src/cli.ts doctor",
+    "walkthrough": "node scripts/ui-walkthrough.mjs"
   },
   "dependencies": {
     "bootstrap": "^5.3.8",
