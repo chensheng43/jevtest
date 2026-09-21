@@ -235,8 +235,10 @@ buildActionSpace(actions, { mode: "readonly" })
 ```
 
 变更型动作（`fill` / `select`，以及 role 属于
-`{button, checkbox, radio, switch, combobox, menuitem}` 的 click）
-在构建候选集时就被剔除。
+`{button, checkbox, radio, switch, combobox, menuitem, menuitemradio, menuitemcheckbox, option, gridcell}`
+的 click）在构建候选集时就被剔除。清单的权威定义是
+`core/policy.ts` 的 `READONLY_BLOCKED_CLICK_ROLES`，与
+[`case-format.md` §mode](case-format.md#关于-mode) 必须一致。
 
 于是 `operation` 问题的 criteria 里根本没有这些选项，**模型物理上无法选中**。
 
@@ -336,8 +338,11 @@ observation must not erase the action.*）
 
 ### 6.6 取消只在步边界生效
 
-`signal.throwIfAborted()` 放在**每一步开始时**，不中断已经开始的浏览器变更。
-否则会留下「点了一半」的状态——这与 6.2 是同一条原则的两面。
+**在每一步开始时检查 `signal.aborted`**（而不是 `throwIfAborted()`），不中断已经开始的
+浏览器变更，以 `cancelled` 正常返回。否则会留下「点了一半」的状态——这与 6.2 是同一条原则的两面。
+
+为什么是「检查」而不是「抛出」：抛出的异常会被 runner 归为 `status: "error"`（基建故障），
+而取消是**用户主动要的结果**，必须记成 `cancelled`。两者在 CI 上的含义完全不同。
 
 ---
 

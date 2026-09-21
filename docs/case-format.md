@@ -60,7 +60,16 @@
 
 `readonly` 不是「事后拒绝」，而是「构造上不可能」。
 被剔除的包括：`fill` 动作、`select` 动作，以及 role 属于
-`{button, checkbox, radio, switch, combobox, menuitem}` 的 click。
+`{button, checkbox, radio, switch, combobox, menuitem, menuitemradio, menuitemcheckbox, option, gridcell}`
+的 click。
+
+后四个（ARIA 的选项、菜单单/复选项，以及日历与表格的可选单元格）不在最初的设计清单里，
+是**实践补上的**：它们的点击同样会改变被提交的值，少列一个，只读用例就能悄悄改掉页面状态，
+而报告里那句「本运行不可能发生变更」就变成了假话。清单的权威定义在
+`src/core/policy.ts` 的 `READONLY_BLOCKED_CLICK_ROLES`，改它必须同步改本文。
+
+刻意**不**剔除的：`link`（导航）、`tab`（切换可见面板，等同导航）、
+`textbox` / `searchbox` / `spinbutton`（点击只是聚焦；输入才是变更，而输入走 `fill` 那条路径）。
 
 ### 关于 `allowedOrigins`
 
@@ -300,7 +309,11 @@ assertions:
 | `blocked` | `false` | agent 卡住了。通常需要改 `goal` 或换更明确的起点 |
 | `budget_exceeded` | `false` | 跑不完。调大预算，或说明用例本身太复杂 |
 | `guardrail_blocked` | `false` | 触碰护栏。**先确认这是不是预期行为**——如果是，说明护栏配得太严；如果不是，说明 goal 写得太宽 |
-| `error` | `null` | 基建故障，不是用例问题。CI 上应区别于测试失败 |
+| `cancelled` | `false` | 断言**照常求值**：跑到一半停下，前半段仍然能说明问题。默认 `statusIn: ["done"]` 下通常判 `false`——运行确实没走完，这不叫谎报 |
+| `error` | `null` | 基建故障，不是用例问题。CI 上应区别于测试失败。**这个 `null` 是刻意的**：引擎都不可达时，断言结论没有依据 |
+
+> 想表达「被拦下是预期结果」，把 `trajectory.statusIn` 写成 `[guardrail_blocked]`；
+> 想表达「取消也算过」，写成 `[done, cancelled]`。断言与 `status` 是两件事，这正是它们的用法。
 
 ---
 

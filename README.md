@@ -2,9 +2,11 @@
 
 **基于快速自主决策的 Web 测试套件平台。** 你提供测试地址和测试用例，它自动跑完并给出可读的报告。
 
-> ⚠️ **当前状态：脚手架。** 模块划分、接口定义、文档已完成，**实现逻辑尚未编写**。
-> 每个 `.ts` 文件里的函数都会抛 `未实现：P0 待实现`。
-> 详见 [当前进度](#当前进度) 与 [如何继续](#如何继续)。
+> ✅ **当前状态：P0 已实现。** 全部模块落地，`npm test` **468 项全绿**
+> （459 项离线 + 9 项真浏览器 e2e），`npx tsc --noEmit` 零错误。
+> 三个子命令 `doctor` / `validate` / `import` 已实测通过；`serve` 与 `run` 见
+> [当前进度](#当前进度) 里尚未实测的两条。
+> 尚未做完的部分（截图通路、JUnit、多引擎）逐项列在 [接下来做什么](#接下来做什么)。
 
 ---
 
@@ -65,7 +67,8 @@ npm run dev -- run cases/wikipedia-godel.yaml
 npm run dev -- doctor               # 检查环境是否齐备
 ```
 
-> **这些命令现在都会退出，因为实现还没写。** `doctor` 与 `--help` 除外。
+> `doctor` / `validate` / `import` 可直接跑；`serve` 与 `run` 需要凭证
+> （`run` 还需要 Chromium，见上一行）。
 
 开发期用 `node --experimental-strip-types` 直接跑 `.ts`，不需要编译。
 `npm run typecheck` 做类型检查，`npm run build` 才产出 `dist/`。
@@ -230,22 +233,45 @@ TypeSafe 给出真实概率分布；通用 LLM 通常只回一个选择，合成
 | 阶段 | 内容 | 状态 |
 | --- | --- | --- |
 | **脚手架** | 目录结构、30 个模块的类型与接口、配置、种子用例、整套文档 | ✅ 完成 |
-| **P0 前置** | `scripted` 引擎 + `fixtures/site/` + `FakeSession`——**验证工具，建议先于骨架落地**（理由见「如何继续」） | ⬜ 未开始 |
-| P0 骨架 | engine(TypeSafe) + browser + core/agent + checks + CLI `run` | ⬜ 未开始 |
-| P1 Web 平台 | server + api + 前端（用例管理、运行、结果页） | ⬜ 未开始 |
-| P2 工程化 | 护栏 + 预算 + trace.zip + JUnit + 并发 | ⬜ 未开始 |
-| P3 收尾 | 套件自身离线测试 + CI | ⬜ 未开始 |
+| **P0 前置** | `scripted` 引擎 + `fixtures/site/` + `FakeSession` | ✅ 完成，且已被 468 项测试用上 |
+| P0 骨架 | engine(TypeSafe) + browser + core/agent + checks + CLI | ✅ 完成 |
+| P1 Web 平台 | server + api + 前端（用例管理、运行、结果页） | ✅ 完成（实时进度用轮询） |
+| P2 工程化 | 护栏 + 预算 + trace.zip + 并发 | ✅ 完成（JUnit 导出仍是 stub） |
+| P3 收尾 | 套件自身离线测试 | ✅ 468 项；CI 配置未做 |
 
-脚手架阶段已验证：
+**已实测通过的：**
 
-- `npm install` 成功，运行时依赖恰好 3 个（本次解析为 playwright 1.63.0 / zod 4.6.5 / yaml 2.9.1。
-  注意 `package.json` 写的是 caret 范围而非固定版本，其中 **zod 的 minor 版本是承重的**——
-  `.prefault()` 的行为决定了用例预算会不会静默失效，见 [docs/development.md §5.1](docs/development.md)）
-- `npx tsc --noEmit` 零类型错误
-- `node --experimental-strip-types src/cli.ts --help` 可运行
-- `node --check src/browser/snapshot.js` 通过
+| 验证 | 结果 |
+| --- | --- |
+| `npx tsc --noEmit` | **0 错误**（`docs/development.md §8` 的硬要求） |
+| `npm test` | **468 / 468**（459 离线 + 9 真浏览器 e2e，零付费调用、零外网） |
+| `node --check src/browser/snapshot.js` | 通过 |
+| `jevtest doctor` | 9 项检查：8 通过 / 1 警告（文本模型未配置）/ 0 失败 |
+| `jevtest validate cases/wikipedia-godel.yaml` | 解析 + 默认值填充 + 内部自洽检查全部通过 |
+| `jevtest import cases/wikipedia-godel.yaml` | 落盘为 `cases/wikipedia-godel/case.yaml`，revision 1，digest 稳定 |
+| 真浏览器全链路（e2e） | 观测 → 决策 → 执行 → 断言 → 报告落盘 + trace.zip；护栏命中时 `executed: false` 且页面处理器未跑；`contextsActive` 归零 |
 
-## 如何继续
+**尚未实测的（需要真凭证，会花钱）：**
+
+| 未做 | 原因 |
+| --- | --- |
+| `jevtest run cases/wikipedia-godel.yaml` 真跑 | 该用例要往搜索框输入（`TYPE_TEXT`），而 `.env` 里的 `TEXT_MODEL_API_KEY` 是空的——按设计它会**直接报错而不是猜一个值**（这正是 `docs/architecture.md §11.1 ④`/`engine/text.ts` 的纪律）。填上 DeepSeek key 即可跑 |
+| `jevtest serve` 端到端手测 | 服务已能起（`doctor` 里的 `/api/health` 走的是同一个 handler），但界面尚未人工点过 |
+| `docs/architecture.md §11.3` 的耗时/成本基线 | 依赖上一条。参考值：上游同类任务 17 次请求、90,558 input tokens |
+
+## 接下来做什么
+
+按价值排序。前两条是**技术债**，其余是 P1 功能。
+
+| # | 事项 | 为什么排这个位置 |
+| --- | --- | --- |
+| 1 | **填 `TEXT_MODEL_API_KEY`，真跑 5 次 `cases/wikipedia-godel.yaml`** | 见下方「验证闸」。全部接口都建立在「上游 7.1 秒跑完 Google Flights」这一个数据点上，而本项目换了浏览器层、加了断言与护栏——**实测过之前，没有任何人知道这些默认值合不合理** |
+| 2 | 人工点一遍 `jevtest serve` | 服务与 API 已实测（`doctor` 走同一个 handler、`tests/api.test.ts` 24 项覆盖路由与三道闸），但没有人在真浏览器里点过界面。前端是唯一「测过逻辑、没人看过样子」的模块 |
+| 3 | 截图通路（`recordFrames`） | `StepRecord.frame` 与 `framesDir` 恒为 null。事件里只带 `frame` 序号的设计已经就位，缺的是 runner→agent 的接线（`browser/session.ts` 的 `frameJpeg()` 是现成的） |
+| 4 | `toJUnit` | `core/report.ts` 里仍是 stub，`GET /api/runs/:id/export?format=junit` 明确回 501。CI 集成前必须有 |
+| 5 | `openai-compat.ts` 通用引擎 | 让 `capabilities.probabilities: "degenerate"` 这条设计有第二个真实用户。需要先解决「引擎的凭证从哪来」（`EngineContext` 目前只有一对 apiKey/model） |
+| 6 | shadow DOM 递归 / 跨 iframe | `docs/limitations.md` 里记着，准入会警告。有 `fixtures/site/` 之后补起来不难 |
+| 7 | CI 配置 | `npm test` 已经能全绿，缺的只是一个 workflow 文件（记得装 Chromium，否则 e2e 会跳过） |
 
 **如果你是新会话接手这个项目，按这个顺序读：**
 
@@ -267,7 +293,7 @@ TypeSafe 给出真实概率分布；通用 LLM 通常只回一个选择，合成
 > 读它们是**替代重新推导**，不要自行发挥——这些结论都对应着具体的失败模式，
 > 重新推导很容易推出一个「看起来更简洁但会静默失真」的方案。
 
-**推荐的实现顺序是纵向切片，不是横向分层：**
+**推荐的实现顺序是纵向切片，不是横向分层**（P0 已按此走完，记在这里供后续参考）：
 
 ```text
 schema/case.ts
@@ -289,27 +315,40 @@ schema/case.ts
 
 **先 CLI 后 Web。** CLI 跑通了，Web 层就只是薄薄的 I/O 与渲染；
 而且离线 e2e 测试（真浏览器 + `scripted` 引擎 + 本地 fixture 站点）
-可以在 Web 层存在之前就锁死 runner 的正确性。
+可以在 Web 层存在之前就锁死 runner 的正确性——实际上它是**最后一个才被补上的**
+模块的验证手段：`core/runner.ts` 与 `core/agent.ts` 的行为全部由
+`FakeSession` + scripted 引擎锁住，一次真实模型调用都没发生。
 
-**在进入 Web 层之前插一道验证闸。** 走到「完整跑完一个用例」这个里程碑之后，
-先拿 `cases/wikipedia-godel.yaml` 真跑 5 次，记下步数、请求数、token、耗时与失败模式，
-再回头重审 `schema/` 与 `engine/` 的接口。
+### 验证闸：真跑一次
 
-理由是：目前几乎每个设计决策——一问多题的收益、三层断言、8 个 `RunStatus`、
+**在进入 Web 层之前插一道验证闸**：拿 `cases/wikipedia-godel.yaml` 真跑 5 次，
+记下步数、请求数、token、耗时与失败模式，再回头重审 `schema/` 与 `engine/` 的接口。
+
+理由是：几乎每个设计决策——一问多题的收益、三层断言、8 个 `RunStatus`、
 每 context 隔离的成本、两个信号量的取值——都建立在「上游 7.1 秒跑完 Google Flights」
 这**一个**数据点上（[architecture.md §11.3](docs/architecture.md) 自己也记着「未实测」）。
-Web 是返工最贵的一层，不该建在未经检验的接口上。
 
-同理，`scripted` 引擎与 `fixtures/site/` 应**先于** P0 骨架落地，而不是等 P3 收尾：
-它们是唯一能在花真钱之前验证其余设计的手段，属于验证工具而非收尾工作。
-
-**动手前的检查：**
+**这道闸目前还没过**（见 [当前进度](#当前进度)）：`.env` 里的 `TEXT_MODEL_API_KEY` 是空的，
+而这个用例要往搜索框输入。填上 key 之后的第一件事就是跑它——**接口是在没有实测数据的情况下
+定型的**，这是当前最大的一处技术债，比任何 TODO 都值得优先处理。
 
 ```bash
-npx tsc --noEmit        # 应为 0
-node --check src/browser/snapshot.js
-npm test                # 目前无测试，会提示找不到文件
+npm run dev -- run cases/wikipedia-godel.yaml        # 跑一次并输出报告
+npm run dev -- run cases/wikipedia-godel.yaml --format md
+npm run dev -- serve                                  # 起界面，逐条看事件与断言
 ```
+
+### 改完代码后的检查
+
+```bash
+npx tsc --noEmit                        # 应为 0（硬要求）
+node --check src/browser/snapshot.js    # 动了快照就要跑
+npm test                                # 468 项，应全绿且无付费调用
+npm run build && ls dist/browser/       # 动了资产就确认复制到位
+```
+
+e2e（`tests/e2e/`）需要真 Chromium：没装时它会**显式跳过**并显示在汇总里，
+而不是让 `npm test` 变红——环境缺浏览器与代码坏掉是两回事。
 
 ## 许可
 

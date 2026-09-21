@@ -122,9 +122,16 @@
 `POST /api/cases/:id/admit` **不运行用例、不调用模型**，只是一次只读的页面探测，
 所以可以在表单里做一个「检测页面」按钮随手点。
 
-> ⚠️ 用例的读写由**哪个模块**负责尚未确定——`src/` 里目前没有用例仓库模块，
-> 见 [`architecture.md §11.2`](architecture.md)。上表里的「文件落盘 / revision / slug 冲突」
-> 等行为都依赖于它。
+> 用例的读写由 `src/store/cases.ts`（`CaseStore`）负责，落点见
+> [`architecture.md §11.2 ①`](architecture.md)。上表里的「文件落盘 / revision / slug 冲突」
+> 都由它实现——**这三条入口（表单、CLI、导入）最终都落到同一个 `write()`**，
+> 这是 D5「YAML 是唯一事实来源」真正被守住的地方。
+>
+> ⚠️ **CLI 不经过 HTTP。** `jevtest run` / `validate` / `import` 直接调用同一套模块
+> （`cli.ts` 的 `createWiring`），`doctor` 调的是 `web/api.ts` 的 `handle()` 但**不经网络**。
+> 理由：为了跑一个用例去绑端口、生成令牌、再让一个浏览器都还没起的 HTTP 服务转发一次，
+> 只增加失败面，而 CI 里并行跑多个 jevtest 时还会撞端口。
+> 于是「前端与 CLI 共用同一套」在**语义与业务逻辑上成立**，在传输层不成立。
 
 ### 3.3 运行
 

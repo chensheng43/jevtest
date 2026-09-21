@@ -108,14 +108,21 @@ runs/
 
 | 字段 | 含义 |
 | --- | --- |
-| `modelCalls` | **实际 HTTP 请求数，含重试。** `budget.maxModelCalls` 与 `quality.maxModelCalls` 都按它算 |
-| `decisions` | 逻辑决策数，不含重试。**只用于展示** |
+| `modelCalls` | **实际 HTTP 请求数，含重试与文本取值。** `budget.maxModelCalls` 与 `quality.maxModelCalls` 都按它算 |
+| `decisions` | 逻辑决策数，不含重试、不含文本取值。**只用于展示** |
 
 一次重试 3 次才成功的决策记 **3** 个 `modelCalls`、**1** 个 `decisions`。
 按逻辑决策数算的话，重试就是一条免费通道——最坏情况实际花费是预算的 3 倍而刹车不会响。
 
-因此 `modelCalls - decisions` 是个有用的读数：**它就是重试造成的额外请求数**。
-报告里看到「24 次调用 / 8 次决策」，就知道有 16 次是重试，问题在网络或限流，
+**文本取值（TYPE_TEXT 走的小模型）也算 `modelCalls`，但不算 `decisions`**：
+它同样是要花钱的一次调用，预算不能对它视而不见。因此
+
+```text
+modelCalls - decisions = 重试造成的额外请求 + 文本取值调用
+```
+
+报告里看到「24 次调用 / 8 次决策」，先看 `steps[]` 里有几次 `fill`：
+差异大致就是「重试 + 输入」。若一次 `fill` 都没有，那这个差就全是重试，问题在网络或限流，
 而不在用例本身。
 
 ### 2.6 断言结果
@@ -213,5 +220,6 @@ JUnit 的映射要点：
 2. 改本文
 3. 若改了 `assertion.checks` 的 key 生成规则，同步改 `core/checks.ts`、前端与本文——
    那是报告与界面之间的接口
-4. 若是**破坏性**变更，递增 `schemaVersion` 并写迁移说明（迁移落点尚未确定，
+4. 若是**破坏性**变更，递增 `schemaVersion` 并写迁移说明（迁移落点是 `store/migrations.ts` 的
+   `REPORT_MIGRATIONS`，见 [architecture.md §11.2 ④](architecture.md)），
    见 [`architecture.md §11.2`](architecture.md)）

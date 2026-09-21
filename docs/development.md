@@ -45,6 +45,7 @@ cp .env.example .env                 # 填 TYPESAFE_API_KEY
 | `JEVTEST_HEADLESS` | `true` | 要肉眼看 agent 操作时设 `false` |
 | `JEVTEST_TRACING` | `true` | 关掉可省磁盘，但失败时就没 trace 可看了 |
 | `JEVTEST_CASES_DIR` / `JEVTEST_RUNS_DIR` | `./cases` / `./runs` | 用例库与运行产物 |
+| `JEVTEST_DEFAULT_ENGINE` | `typesafe` | 用例未声明 `engine` 时用它。`scripted` 不在注册表里（测试专用，见下） |
 
 `JEVTEST_WORKERS` 与 `JEVTEST_ENGINE_INFLIGHT` 为什么是两个而不是一个：
 前者的瓶颈是浏览器内存（每 context 约 80~150MB），后者是厂商侧限流。
