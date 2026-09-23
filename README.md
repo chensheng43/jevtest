@@ -44,7 +44,7 @@ jevtest 把它抽象成产品：加了用例模型、断言层、批量执行、
 
 ## 快速开始
 
-需要 Node ≥ 22.6。
+需要 Node ≥ 22.7。
 
 ```bash
 npm install
@@ -162,7 +162,6 @@ src/
 | 6 | 通用 LLM 引擎（`openai-compat.ts`） | 让 `probabilities: "degenerate"` 这条设计有第二个真实用户。需要先解决引擎凭证从哪来（`EngineContext` 目前只有一对 apiKey/model） |
 | 7 | TypeSafe 的金额映射 | 实测响应里没有金额字段，成本类断言在真引擎下是 skipped |
 | 8 | shadow DOM 递归 / 跨 iframe | 见 [`limitations.md`](docs/limitations.md)，准入会警告 |
-| 9 | CI 配置 | `npm test` 已能全绿，缺一个 workflow 文件（记得装 Chromium，否则 e2e 会跳过） |
 
 ## 许可
 

@@ -8,7 +8,7 @@
 
 | 要求 | 版本 | 说明 |
 | --- | --- | --- |
-| Node | **≥ 22.6** | 需要 `--experimental-strip-types`，更低的版本连 `npm test` 都跑不起来 |
+| Node | **≥ 22.7** | 需要 `--experimental-strip-types`（22.6 才有，但 22.6 剥不了类私有字段上的类型标注），更低的版本连 `npm test` 都跑不起来 |
 | npm | 任意较新版本 | 不需要 pnpm |
 
 ```bash

@@ -665,16 +665,17 @@ async function commandDoctor(argv: ParsedArgs): Promise<number> {
   const settings = applyFlags(loadSettings(), argv.flags);
   const checks: DoctorCheck[] = [];
 
-  // 1. Node 版本。engines 要求 >= 22.6（需要 --experimental-strip-types）。
+  // 1. Node 版本。engines 要求 >= 22.7：--experimental-strip-types 在 22.6 才有，
+  //    但 22.6 的实现剥不了类私有字段上的类型标注（`#limit: number`），本项目用到了。
   const [major = 0, minor = 0] = process.versions.node.split(".").map(Number);
   checks.push(
-    major > 22 || (major === 22 && minor >= 6)
+    major > 22 || (major === 22 && minor >= 7)
       ? { name: "Node 版本", status: "ok", detail: `v${process.versions.node}` }
       : {
           name: "Node 版本",
           status: "failure",
-          detail: `v${process.versions.node} 低于要求（>= 22.6）`,
-          fix: "升级 Node 到 22.6 以上；开发期依赖 --experimental-strip-types",
+          detail: `v${process.versions.node} 低于要求（>= 22.7）`,
+          fix: "升级 Node 到 22.7 以上；开发期依赖 --experimental-strip-types",
         },
   );
 

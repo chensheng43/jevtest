@@ -5,7 +5,7 @@
   "description": "基于快速自主决策的 Web 测试套件平台：给测试地址和用例，自动跑完并产出报告",
   "type": "module",
   "engines": {
-    "node": ">=22.6"
+    "node": ">=22.7"
   },
   "bin": {
     "jevtest": "./dist/cli.js"
