@@ -36,6 +36,7 @@
 
 import type { BudgetView, DecisionEngine, DecisionRequest, DecisionResult, Option, Question, TextRequest, TextResult } from "./types.ts";
 import type { Answer } from "./types.ts";
+import { attachFailedCallUsage } from "./types.ts";
 import type { Usage } from "../schema/report.ts";
 import { TEXT_VALUE } from "../core/rules.ts";
 import { Semaphore } from "../util/async.ts";
@@ -158,9 +159,17 @@ export function createTypeSafeEngine(options: TypeSafeOptions): DecisionEngine {
         what: "决策",
       });
 
+      // 响应已经拿到（已计费），映射失败也要把这次的用量交给调用方记账
+      const usage = extractUsage(json, requests);
+      let answers: DecisionResult["answers"];
+      try {
+        answers = mapAnswers(json, req.questions);
+      } catch (error) {
+        throw attachFailedCallUsage(error, { usage, latencyMs: performance.now() - started });
+      }
       return {
-        answers: mapAnswers(json, req.questions),
-        usage: extractUsage(json, requests),
+        answers,
+        usage,
         latencyMs: performance.now() - started,
         engine: TYPESAFE_ENGINE_NAME,
         // 原始响应只进 trace。**绝不参与执行**：执行用的是校验过的 Answer。
@@ -193,10 +202,24 @@ export function createTypeSafeEngine(options: TypeSafeOptions): DecisionEngine {
         what: "文本取值",
       });
 
-      const parsed = parseTextHelperOutput(readChatContent(json));
+      const usage = extractUsage(json, requests);
+      let parsed: ReturnType<typeof parseTextHelperOutput>;
+      try {
+        parsed = parseTextHelperOutput(readChatContent(json));
+      } catch (error) {
+        // 与 decide 同理：响应已计费。包成 EngineRequestError，保留「没有浏览器动作」这条信号
+        const wrapped =
+          error instanceof EngineRequestError
+            ? error
+            : new EngineRequestError(
+                `文本取值的响应无法解析：${error instanceof Error ? error.message : String(error)}。**没有任何浏览器动作被执行。**`,
+                { cause: error },
+              );
+        throw attachFailedCallUsage(wrapped, { usage, latencyMs: performance.now() - started });
+      }
       return {
         text: parsed.text,
-        usage: extractUsage(json, requests),
+        usage,
         latencyMs: performance.now() - started,
         engine: TYPESAFE_ENGINE_NAME,
       };
@@ -362,7 +385,28 @@ type AttemptOutcome =
  * `Retry-After` 目前不解析（P1）：厂商给的头需要与退避策略合并取大者，
  * 而现有契约只写了指数退避，先照契约做，不自行发挥。
  */
+/**
+ * `sendWithRetry` 的外壳：失败时把**已经发出的请求数**挂到错误上。
+ * 那些请求真实发出过、可能已计费，调用方据此记账（见 types.ts 的 failedCallUsage）。
+ */
 async function postJson(o: PostOptions): Promise<{ json: unknown; requests: number }> {
+  const started = performance.now();
+  const counter = { requests: 0 };
+  try {
+    return await sendWithRetry(o, counter);
+  } catch (error) {
+    if (counter.requests === 0) throw error;
+    throw attachFailedCallUsage(error, {
+      usage: { inputTokens: 0, outputTokens: 0, costUsd: null, requests: counter.requests },
+      latencyMs: performance.now() - started,
+    });
+  }
+}
+
+async function sendWithRetry(
+  o: PostOptions,
+  counter: { requests: number },
+): Promise<{ json: unknown; requests: number }> {
   if (o.apiKey.trim().length === 0) {
     throw new EngineRequestError(
       `${o.what}请求无法发出：未配置 API key，没有任何浏览器动作被执行。` +
@@ -373,6 +417,7 @@ async function postJson(o: PostOptions): Promise<{ json: unknown; requests: numb
   let requests = 0;
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
     requests += 1; // **在 fetch 之前计数**：预算刹车必须数到那些没回来的请求。
+    counter.requests = requests;
 
     // 许可只覆盖「一次真实的 HTTP 往返」（含读体），不覆盖退避等待——
     // 否则重试等待会白占一个名额，把限流变成对并发度的无谓压制。

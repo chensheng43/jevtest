@@ -66,6 +66,7 @@ import type {
   StepRecord,
 } from "../schema/report.ts";
 import type { DecisionEngine, DecisionResult, RecentActionIR, TextRequest } from "../engine/types.ts";
+import { failedCallUsage } from "../engine/types.ts";
 import type { Action, Observation, Session } from "../browser/session.ts";
 import type { BudgetMeter } from "./budget.ts";
 import type { Resolved } from "./policy.ts";
@@ -275,6 +276,8 @@ export class CaseAgent {
       try {
         decision = await engine.decide(request, signal);
       } catch (error) {
+        // 失败的调用也可能已经计费（重试耗尽、响应形状不对）：先记账再决定怎么收尾
+        this.recordFailedCall(error);
         // 取消大多恰好落在这里（等模型是一步里最久的阶段），而引擎会立刻中断 fetch 并抛出。
         // 此时浏览器还没收到这一步的任何输入，与步边界取消是同一种情况：以 cancelled
         // 正常返回，照常求值断言——而不是让异常冒到 runner、报告里断言与准入全空（§6.6）。
@@ -399,6 +402,7 @@ export class CaseAgent {
         try {
           generated = await this.writeText(resolved.action, page, signal);
         } catch (error) {
+          this.recordFailedCall(error);
           // 同 decide：文本还没生成，输入还没发出，取消在这里等价于步边界取消
           if (signal.aborted) {
             this.status = "cancelled";
@@ -691,6 +695,12 @@ export class CaseAgent {
    * 缓存只在「整个输入完全一致」时命中——目标字段、页面标题与文本、近期动作、
    * goal 有一项不同就是另一个键。这是 agent.py:110-114 那条规则的直译。
    */
+  /** 引擎在错误上挂了已发生的用量时（见 engine/types.ts 的 failedCallUsage）照样记账 */
+  private recordFailedCall(error: unknown): void {
+    const failed = failedCallUsage(error);
+    if (failed !== null) this.deps.budget.recordCall(failed.usage, failed.latencyMs);
+  }
+
   private async writeText(
     action: Action,
     page: Observation,

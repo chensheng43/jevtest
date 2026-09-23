@@ -32,6 +32,7 @@ import {
   createTypeSafeEngine,
 } from "../src/engine/typesafe.ts";
 import type { DecisionRequest, TextRequest } from "../src/engine/types.ts";
+import { failedCallUsage } from "../src/engine/types.ts";
 import type { TypeSafeOptions } from "../src/engine/typesafe.ts";
 
 // ---------------------------------------------------------------------------
@@ -459,6 +460,8 @@ test("503 连续三次后失败：恰好尝试 MAX_ATTEMPTS 次，退避逐次�
   assert.ok(error instanceof EngineRequestError);
   assert.equal(endpoint.requests.length, MAX_ATTEMPTS);
   assert.match(error.message, /已重试 2 次/);
+  // 三次请求都真实发出、都可能计费：失败也要把用量交给调用方记账，否则重试失败是免费通道
+  assert.equal(failedCallUsage(error)?.usage.requests, MAX_ATTEMPTS);
   // 40 + 80 = 120ms：固定间隔会给出 80ms，退避没生效会给出 ~0ms。
   assert.ok(elapsed >= 110, `退避应逐次翻倍（40+80ms），实际 ${Math.round(elapsed)}ms`);
   await engine.close();
@@ -627,6 +630,7 @@ test("缺 probabilities 时报错，而不是合成 one-hot 让概率断言假�
   assert.match(error.message, /probabilities/);
   assert.match(error.message, /假通过/);
   assert.equal(endpoint.requests.length, 1, "响应不可用不该触发重试");
+  assert.equal(failedCallUsage(error)?.usage.requests, 1, "响应已计费：映射失败也要记账");
   await engine.close();
 });
 
@@ -916,10 +920,13 @@ test("writeText 拒绝带前言的输出：模型输出直接进真实表单，�
     engineOptions(endpoint.endpoint, { text: { apiKey: "k", baseUrl: endpoint.endpoint, model: "m" } }),
   );
 
-  await assert.rejects(
-    () => engine.writeText(textRequest(), new AbortController().signal),
-    /不是合法 JSON/,
+  const error = await engine.writeText(textRequest(), new AbortController().signal).then(
+    () => null,
+    (reason: unknown) => reason,
   );
+  assert.ok(error instanceof EngineRequestError, "解析失败也保留「没有浏览器动作」这条信号");
+  assert.match(error.message, /不是合法 JSON/);
+  assert.equal(failedCallUsage(error)?.usage.requests, 1);
   await engine.close();
 });
 

@@ -198,6 +198,40 @@ export interface DecisionEngine {
   close(): Promise<void>;
 }
 
+// ---------------------------------------------------------------------------
+// 失败调用的用量
+// ---------------------------------------------------------------------------
+
+/**
+ * 失败的调用也可能已经计费：429 重试三次仍失败、HTTP 200 但响应形状不对……
+ * 这些请求都真实发出去了。只在成功时记账的话，预算刹车与报告里的 modelCalls /
+ * token 都会偏低，重试失败又成了一条免费通道（architecture.md §11.2 ⑤）。
+ *
+ * 引擎在抛出的错误上用 `attachFailedCallUsage` 挂上已发生的用量，调用方用
+ * `failedCallUsage` 取出来记账。用 Symbol 键而不是约定一个错误类：
+ * core 不必认识每个引擎各自的错误类型。
+ */
+const FAILED_CALL_USAGE = Symbol.for("jevtest.failedCallUsage");
+
+export interface FailedCallUsage {
+  usage: Usage;
+  latencyMs: number;
+}
+
+export function attachFailedCallUsage<E>(error: E, value: FailedCallUsage): E {
+  if (typeof error === "object" && error !== null && !(FAILED_CALL_USAGE in error)) {
+    Object.defineProperty(error, FAILED_CALL_USAGE, { value, enumerable: false });
+  }
+  return error;
+}
+
+/** 取出失败调用已发生的用量。没挂（例如一个请求都没发出）时返回 null */
+export function failedCallUsage(error: unknown): FailedCallUsage | null {
+  if (typeof error !== "object" || error === null) return null;
+  const value = (error as { [FAILED_CALL_USAGE]?: FailedCallUsage })[FAILED_CALL_USAGE];
+  return value ?? null;
+}
+
 // TODO(P0): 实现 typesafe.ts —— 唯一真实引擎。
 //   POST https://api.typesafe.ai/v1/systemone
 //   body: {model, state: {page, elements, recent_actions}, questions: {...}}

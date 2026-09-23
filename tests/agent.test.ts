@@ -24,6 +24,7 @@ import { InputInterrupted, StalePage } from "../src/core/errors.ts";
 import { createScriptedEngine, constantSteps } from "../src/engine/scripted.ts";
 import type { ScriptedStep } from "../src/engine/scripted.ts";
 import type { DecisionEngine } from "../src/engine/types.ts";
+import { attachFailedCallUsage } from "../src/engine/types.ts";
 import { CaseDefinitionSchema } from "../src/schema/case.ts";
 import type { Case, CaseDefinition } from "../src/schema/case.ts";
 import type { RunEvent } from "../src/schema/events.ts";
@@ -477,6 +478,31 @@ test("取消：落在等模型响应时，同样以 cancelled 正常返回并照
   assert.notEqual(report.assertion, null, "页面已经观测到了：断言照常求值");
   assert.notEqual(report.admission, null, "准入也已采集");
   assert.match(report.failureReason ?? "", /取消/);
+});
+
+test("失败的模型调用也记账：重试耗尽后的请求数进 stats.modelCalls", async () => {
+  // 引擎在错误上挂了「已经发出 3 个请求」：它们真实发出、可能已计费。
+  // 只在成功时记账的话，报告里 modelCalls 是 0，重试失败就成了免费通道。
+  const caseDef = makeCase();
+  const session = new FakeSession({ observations: [richPage({ fingerprint: "fp-0" })] });
+  const inner = createScriptedEngine({ steps: constantSteps(clickLink(), 1) });
+  const failure = attachFailedCallUsage(new Error("HTTP 503，已重试 2 次仍失败"), {
+    usage: { inputTokens: 0, outputTokens: 0, costUsd: null, requests: 3 },
+    latencyMs: 12,
+  });
+  const engine: DecisionEngine = {
+    ...inner,
+    name: inner.name,
+    capabilities: inner.capabilities,
+    decide: () => Promise.reject(failure),
+  };
+  const budget = createBudgetMeter(caseDef.budget);
+  const agent = new CaseAgent({ session, engine, budget, events: { emit: () => {} }, caseDef });
+
+  // 引擎故障仍然让 run() 抛出（由 runner 写成 error），但账要先记上
+  await assert.rejects(() => agent.run(new AbortController().signal), /503/);
+  assert.equal(budget.stats().modelCalls, 3);
+  assert.equal(budget.stats().decisions, 0, "没有得到决策，不算一次逻辑决策");
 });
 
 test("取消：首个步边界之前就中止时不打开页面，也不产生断言结论", async () => {
