@@ -116,8 +116,8 @@
 **用例可以进 Git**（有 diff、有 review、能回滚），
 **非技术同学也能用表单编辑同一份文件**。
 
-保证不漂移的机制：`tests/schema.test.ts` 对每个样例做
-「YAML → 解析 → 渲染表单 → 反解 → 深度比较」。
+保证不漂移的机制：`tests/yaml-roundtrip.test.ts` 锁「YAML ↔ 对象」逐字节往返，
+`tests/frontend.test.ts` 锁「对象 → 表单草稿 → 对象」语义不变。
 
 **放弃了什么**：纯数据库存储的灵活性（查询、并发编辑、权限）。
 本项目是单机工具，文件足够。
@@ -306,7 +306,7 @@ TypeSafe 给出真实的概率分布，但通用 LLM 通常只回一个选择，
 ## D14. 内置护栏只增不减
 
 **决定**：用例只能往护栏里**追加**规则；移除内置规则需要显式设置
-`allowDefaultOverride: true`，且报告会打红色横幅。
+`allowDefaultOverride: true`，且报告应打红色横幅（**尚未落地**：报告目前不记录这件事，见 [limitations.md §9](limitations.md)）。
 
 **为什么**：
 

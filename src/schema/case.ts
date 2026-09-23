@@ -137,7 +137,7 @@ export interface Assertions {
  *
  * 内置默认集（破坏性动词、密码框、文件上传）**只增不减**：用例只能追加，
  * 不能移除。要移除必须显式设置 `allowDefaultOverride: true`，
- * 且报告顶部会打红色横幅。
+ * 且报告应打红色横幅（尚未落地，见 docs/limitations.md §9）。
  */
 export interface Guardrail {
   labelContains?: string;

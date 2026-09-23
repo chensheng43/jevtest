@@ -501,7 +501,7 @@ async function viewCases(app) {
         title: "还没有用例",
         children: [
           hint("粘一份 case.yaml，或者只填三个必填项手写一个——两条路都在「导入」页里。"),
-          el("p", {}, [el("code", { text: "npm run dev -- import examples/wikipedia-search.yaml" })]),
+          el("p", {}, [el("code", { text: "npm run dev -- import cases/wikipedia-godel.yaml" })]),
         ],
       }),
     );
@@ -1553,8 +1553,8 @@ async function viewCaseEditor(app, caseId) {
         hint(
           "它是**整套停用**，不是「删掉其中几条」——内置的删除/支付/下单/密码框那批规则一起退出。"
           + "要让某一条仍然生效，得把它抄进上面的列表。"
-          + "另外：`guard.ts` 里那句「报告顶部会打红色横幅」目前**没有落地**——"
-          + "报告里没有任何字段记录这次运行停用过内置护栏。这是本项目的已知缺口，不是这里的说明写错了。",
+          + "另外：按设计报告顶部应打红色横幅，但目前**没有落地**——"
+          + "报告里没有任何字段记录这次运行停用过内置护栏。",
         ),
       ]),
     );

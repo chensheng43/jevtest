@@ -24,7 +24,7 @@ npm test
 | 文件 | 覆盖内容 |
 | --- | --- |
 | `schema.test.ts` | **默认值必须真的被解析**——断言 `CaseDefinitionSchema.parse({最小输入}).budget.maxModelCalls === 40`。这条专门守着 zod v4 的 `.default({})` 陷阱，见下方 |
-| `yaml-roundtrip.test.ts` | YAML → 对象 → 序列化 → 解析 → 深比较；digest 稳定。（真正的「表单 ↔ YAML」往返要等 Web 表单层，目前锁的是「YAML ↔ 对象」这一段） |
+| `yaml-roundtrip.test.ts` | YAML → 对象 → 序列化 → 解析 → 深比较；digest 稳定。「对象 ↔ 表单草稿」那一段在 `frontend.test.ts` |
 | `migrations.test.ts` | 逐级升级、版本过高报错、迁移链断裂报错 |
 | `config.test.ts` | 环境变量默认值、越界拒绝、布尔写法、错误信息含修复方式 |
 | `policy.test.ts` | `buildActionSpace` 的 readonly 模式**不含** `TYPE_TEXT` / `SELECT` 键；一个节点只拿一个索引；select 的每个 option 是独立 target；**断言不进 prompt**；只读角色清单与文档一致 |

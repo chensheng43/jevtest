@@ -221,5 +221,4 @@ JUnit 的映射要点：
 3. 若改了 `assertion.checks` 的 key 生成规则，同步改 `core/checks.ts`、前端与本文——
    那是报告与界面之间的接口
 4. 若是**破坏性**变更，递增 `schemaVersion` 并写迁移说明（迁移落点是 `store/migrations.ts` 的
-   `REPORT_MIGRATIONS`，见 [architecture.md §11.2 ④](architecture.md)），
-   见 [`architecture.md §11.2`](architecture.md)）
+   `REPORT_MIGRATIONS`，见 [architecture.md §11.2 ④](architecture.md)）

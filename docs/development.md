@@ -191,7 +191,7 @@ assert.equal(CaseDefinitionSchema.parse({ 最小输入 }).budget.maxModelCalls, 
 它们由 `scripts/copy-assets.mjs` 负责，`npm run build` 里已串好。
 
 漏了的话本地开发察觉不到（类型剥离直接跑源码），**部署时才炸**。
-所以 `doctor` 里要加一条 dist 资产完整性检查。
+`doctor` 里的「dist 资产」检查就是为此设的。
 
 `snapshot.js` 之所以保持 `.js`：它以**文本**读出后注入 `page.evaluate`，
 从不作为模块 import。保持 `.js` 可以继续被 `node --check` 与 IDE 语法校验。
@@ -322,4 +322,3 @@ npm run build && ls dist/browser/         # 动了资产就确认复制到位
 | 事项 | 状态 |
 | --- | --- |
 | 无头模式下的完整任务跑通 | 未验证。这是 CI 的前提，应先于 CI 搭建验证 |
-| `doctor` 的 dist 资产完整性检查 | 尚未实现（见 §5.2）。漏了本地察觉不到，**部署时才炸** |

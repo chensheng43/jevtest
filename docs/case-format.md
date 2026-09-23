@@ -2,7 +2,7 @@
 
 **本文是用例格式的权威定义。** YAML 文件、Web 表单、CLI 三条入口最终都归一到
 同一份 schema（`src/schema/case.ts`）。改 schema 必须同步改本文；
-`tests/schema.test.ts` 会用「解析 → 渲染表单 → 反解 → 深度比较」锁死两者一致。
+`tests/schema.test.ts` 逐条核对本文列出的默认值，`tests/frontend.test.ts` 核对表单载入再保存不改变用例。
 
 一个完整的例子见 [`cases/wikipedia-godel.yaml`](../cases/wikipedia-godel.yaml)。
 
@@ -132,8 +132,8 @@ guardrails:
 内置集覆盖破坏性动词（delete / purchase / pay / checkout / place order /
 transfer / 删除 / 支付 / 下单……）与敏感输入（密码框、文件上传）。
 
-用例**只能追加，不能移除**。要移除必须显式设置 `allowDefaultOverride: true`，
-且报告顶部会打红色横幅。
+用例**只能追加，不能移除**。要移除必须显式设置 `allowDefaultOverride: true`。
+注意它是**整套停用**，不是删掉其中几条。按设计报告顶部应打红色横幅（**尚未落地**：报告目前不记录这件事，见 [limitations.md §9](limitations.md)）。
 
 这个设计是为了让「悄悄关掉安全网」变得困难：默认安全，放弃安全需要明说。
 

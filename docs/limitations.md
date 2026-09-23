@@ -136,18 +136,15 @@ P1 计划加约 10 行递归支持。届时需要考虑：
 | 登录态管理 | 底层 `storageState` 能力已规划，但无界面与用例字段 |
 | 多角色流程 | 不支持 |
 | 视觉回归（像素比对） | 不支持，且不在计划内 |
-| **报告里标注「这次运行停用过内置护栏」** | **没有落地。** `allowDefaultOverride: true` 确实会让内置护栏整套失效（`guard.ts` 的 `builtInDenyList`），但报告里没有任何字段记录这件事——`effectiveDenyList` 返回的 `overridden` 信号**只有测试在调用**，生产路径上没人消费它。于是「护栏被关掉的那次运行」与「护栏生效的那次运行」在报告里长得一模一样。`guard.ts:20` 与 `case.ts:139` 的注释都写着「报告顶部会打红色横幅」，那句目前是假的。编辑器的 `allowDefaultOverride` 说明已按实际改写并点名了这个缺口；要真补上，需要给 `CaseRunReport` 加一个字段并在结果页渲染它 |
+| **报告里标注「这次运行停用过内置护栏」** | **没有落地。** `allowDefaultOverride: true` 确实会让内置护栏整套失效（`guard.ts` 的 `builtInDenyList`），但报告里没有任何字段记录这件事——`effectiveDenyList` 返回的 `overridden` 信号**只有测试在调用**，生产路径上没人消费它。于是「护栏被关掉的那次运行」与「护栏生效的那次运行」在报告里长得一模一样。编辑器的 `allowDefaultOverride` 说明里点名了这个缺口；要补上，需要给 `CaseRunReport` 加一个字段并在结果页渲染它 |
 
 ---
 
 ## 用例准入清单
 
-**本表是准入判定的权威来源。** `src/browser/admission.ts` 的规则必须以此为准，
-改本表就要同步改它，反之亦然。
-
-> 这两处目前靠人工同步——**本身就是一处待消灭的双事实来源**，正是 D5 想避免的东西。
-> 建议把规则写成数据（`ADMISSION_RULES`，每条含 `id` / 判定 / 文案），文档从它生成。
-> 见 [architecture.md §11.2](architecture.md)。
+本表与 `src/browser/admission.ts` 的 `ADMISSION_RULES` 描述同一套规则，改一处就要同步改另一处。
+规则表里每条的 `rationale` 都必须指向本文的具体小节（`tests/admission.test.ts` 会检查）；
+本表尚未从规则表自动生成，这一段仍靠人工同步。
 
 写新用例前逐条过一遍。任一条命中「blocking」就不该写成 jevtest 用例。
 

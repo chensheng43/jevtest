@@ -1,14 +1,12 @@
 # HTTP API 参考
 
-本地服务的 REST 端点。**前端与 CLI 共用同一套**——`jevtest doctor` 打 `/api/health`，
-`jevtest run` 走 `/api/runs`。CI 不依赖界面，因此**状态码必须正确**，它是判断成败的依据。
+本地服务的 REST 端点，供前端使用。**状态码必须正确**——脚本与 CI 靠它判断成败。
 
 实现集中在 [`src/web/api.ts`](../src/web/api.ts)（唯一入口 `handle()`），
 路由与守卫在 [`src/web/server.ts`](../src/web/server.ts)。
 
-> **本文件的状态标记。** 端点清单与守卫规则来自代码，已确定；
-> 请求/响应体凡是能从现有类型（`CaseDefinition`、`CaseRunReport`、`QueueStatus`…）
-> 推导的就标**已定**，推导不出的标 **待定**——待定的部分**尚未拍板，不要照猜实现**。
+CLI 不经过 HTTP：`run` / `validate` / `import` 直接调用同一套模块，
+`doctor` 调同一个 `handle()` 但不经网络（[`decisions.md` D16](decisions.md)）。
 
 ---
 
@@ -69,7 +67,7 @@
 
 | 方法 | 路径 | 说明 | 契约 |
 | --- | --- | --- | --- |
-| GET | `/api/health` | 健康检查。CLI `doctor` 也用它 | **待定** |
+| GET | `/api/health` | 健康检查：Node 版本、并发与录制配置、用例/运行目录、缺哪些凭证。CLI `doctor` 也用它 | 已定（`web/api.ts`） |
 | GET | `/api/engines` | 已注册引擎与各自能力 | **已定** |
 
 `GET /api/engines` 的响应即 `registry.listEngines()` 的返回值：
@@ -126,12 +124,6 @@
 > [`architecture.md §11.2 ①`](architecture.md)。上表里的「文件落盘 / revision / slug 冲突」
 > 都由它实现——**这三条入口（表单、CLI、导入）最终都落到同一个 `write()`**，
 > 这是 D5「YAML 是唯一事实来源」真正被守住的地方。
->
-> ⚠️ **CLI 不经过 HTTP。** `jevtest run` / `validate` / `import` 直接调用同一套模块
-> （`cli.ts` 的 `createWiring`），`doctor` 调的是 `web/api.ts` 的 `handle()` 但**不经网络**。
-> 理由：为了跑一个用例去绑端口、生成令牌、再让一个浏览器都还没起的 HTTP 服务转发一次，
-> 只增加失败面，而 CI 里并行跑多个 jevtest 时还会撞端口。
-> 于是「前端与 CLI 共用同一套」在**语义与业务逻辑上成立**，在传输层不成立。
 
 ### 3.3 运行
 
@@ -151,7 +143,7 @@
 | `GET /api/runs/:id` | — | `CaseRunReport` | 已定 |
 | `GET /api/runs/:id/events?since=N` | `since` = 上次拿到的 `seq` | `SeqEvent[]` | 已定 |
 | `POST /api/runs/:id/cancel` | — | `boolean`（是否成功请求取消） | 已定 |
-| `GET /api/runs/:id/export?format=md\|junit` | `format` | `text/markdown` 或 `application/xml` | 已定 |
+| `GET /api/runs/:id/export?format=md\|junit` | `format` | `text/markdown`；`junit` 尚未实现，回 `501` | 已定 |
 
 `RunOptions`：`{ recordFrames?, engineOverride?, suiteRunId? }`。**`engineOverride` 用于同一用例的 A/B 对比**。
 
