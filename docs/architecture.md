@@ -485,26 +485,18 @@ maxEngineInflight 限制厂商侧限流
 
 ---
 
-## 11. 设计缺口与待验证
+## 11. 实现层定案与待验证
 
-这一节记录三类东西。**§11.1 与 §11.2 已全部定案**，读它们是替代重新推导——
-动手时照此执行，不要自行发挥。§11.3 是诚实的未知，别当成结论。
+§11.1 与 §11.2 是几处「看起来可以自由发挥、实际已经定死」的实现选择。
+每条都对应一种**不报错、只会让报告或成本统计悄悄失真**的失败模式——
+改相关代码前先读，不要重新推导出一个「看起来更简洁」的方案。
+§11.3 是实测数据与仍未验证的事项。
 
-| 小节 | 状态 | 内容 |
-| --- | --- | --- |
-| §11.1 接口层矛盾 | ✅ 已定案 | 6 处签名与契约对不上的地方，以及各自的结论与理由 |
-| §11.2 通路与模块 | ✅ 已补齐 | 5 处「接口自洽但接线不存在」，新增 `src/store/` 两个模块 |
-| §11.3 待验证 | ⏳ 未实测 | 耗时成本、无头模式、浏览器差异等，需要真跑才能回答 |
+### 11.1 接口层
 
-### 11.1 接口层矛盾（已定案）
+#### ① `checkQuality` 读 `history` ＋ ② 分布质量按步判定
 
-以下六处曾是**签名与契约对不上**——照现状写实现只能靠猜，猜错了不会报错，
-只会让报告悄悄失真或让成本上限静默失效。**现已全部定案**，
-结论与理由记在这里。实现时照此执行，不要再自行推导。
-
-#### ① `checkQuality` 缺 `history` ＋ ② `distribution` 被压成整轮一个值
-
-**结论**：删掉 `CheckContext.distribution`，`checkQuality` 改收 `history`。
+**结论**：`CheckContext` 没有整轮的 `distribution`，`checkQuality` 收 `history`。
 分布质量是**每次回答**的属性，逐步从 `StepRecord.distribution` 读。
 
 压成整轮一个值必然二选一：过度 skip（丢掉真实的 full 覆盖），
@@ -522,18 +514,18 @@ maxEngineInflight 限制厂商侧限流
 
 无任何步可求值时返回 **skipped**，不是通过。
 
-#### ③ `BudgetMeter` 收不到 `RunStats`
+#### ③ `RunStats` 归 `BudgetMeter` 独占
 
 **结论**：`RunStats` 由 **`BudgetMeter` 独占**。`check()` / `view()` / `summary()`
-不再收 `stats` 参数，新增 `recordStep()` 与 `stats()`。
+不收 `stats` 参数，计数走 `recordStep()`，读取走 `stats()`。
 
 理由是 `recordCall` 是唯一知道「这次调用花了多少」的地方。让调用方也维护一份计数
 就会出现两个事实来源，而它们迟早分叉——分叉的表现是**成本统计悄悄失真**且不报错。
-`elapsedMs` 一并归它算（它持有起始时刻），`AgentDeps.clock` 因此删除。
+`elapsedMs` 一并归它算（它持有起始时刻），`AgentDeps` 因此没有 `clock`。
 
-#### ④ `engineOptions` 曾被三处引用却未定义
+#### ④ 用例里没有 `engineOptions`
 
-**结论**：**砍掉，不补进 schema。**
+**结论**：**不给用例加引擎私有配置。**
 
 scripted 是测试专用引擎，而用例是给用户写的——用户不该在 YAML 里看到「答案序列」。
 何况往「YAML 是唯一事实来源」这个契约里加自由形态 `Record<string, unknown>`，
@@ -541,21 +533,21 @@ scripted 是测试专用引擎，而用例是给用户写的——用户不该�
 
 更好的通路本来就有：`RunnerDeps.createEngine: (caseDef: Case) => DecisionEngine`
 是现成的注入点，测试里传 `() => createScriptedEngine({steps})` 即可，零 schema 变更。
-`engine/registry.ts` 的 `EngineContext.options` 已删除，生产用例永不声明
+`engine/registry.ts` 的 `EngineContext` 没有 `options`，生产用例永不声明
 `engine: scripted`。
 
-#### ⑤ `AssertionResult.passed` 的三态空洞
+#### ⑤ `AssertionResult.passed` 是三态
 
 **结论**：字段类型为 **`boolean | null`**，聚合规则在 `core/checks.ts` 的 `aggregateChecks`，
 逐行含义见 [`report-format.md` §2.6](report-format.md)。关键是「无失败但有跳过」判 `null` 而非 `true`——
 判 `true` 就是 D9 要杜绝的谎报覆盖。想要确定的结论，就不该用需要概率的断言。
 
-#### ⑥ `admission` 字段曾经没有调用点
+#### ⑥ 准入是记录，不是闸
 
 **结论**：定位为**记录与警告，不是运行的闸**。调用点在 `CaseAgent.run()`
 第一次 `observe()` 之后——不是入队时，因为那要开页面，会让入队变慢。
 `blocking` 项在报告顶部显著展示，但**不阻止运行**。
-要不要真做成闸留到 P1（那需要给 `RunStatus` 加成员，是 schema 变更）。
+若要做成闸，需要给 `RunStatus` 加成员，是 schema 变更。
 
 结构同时解决了 `admit(page: unknown)` 收裸 Playwright `Page` 的问题：
 
@@ -564,14 +556,10 @@ Session.probe()     -> AdmissionStats   （要真浏览器，不可单元测试�
 admit(stats, case)  -> AdmissionReport  （纯函数，可单元测试）
 ```
 
-这样切是因为**判定规则需要能回归**——而准入规则正是假阳性的第一道防线，
-靠人肉核对的规则表迟早与代码漂移。规则写成数据（`ADMISSION_RULES`），
-顺带解决了 §11.2 最后一行「准入规则两处事实来源」：文档可以从规则表生成。
+这样切是因为**判定规则需要能回归**——而准入规则正是假阳性的第一道防线。
+规则写成数据（`ADMISSION_RULES`），将来 `limitations.md` 的准入清单可以从它生成（尚未做）。
 
-### 11.2 通路与模块（已补齐）
-
-以下五处曾是**接线不存在**——接口自洽，但实现时会发现无处可接。
-现已补上模块或定死通路。新增的两个模块在 `src/store/`。
+### 11.2 通路与模块
 
 #### ① 用例仓库：`src/store/cases.ts`
 
@@ -606,12 +594,12 @@ admit(stats, case)  -> AdmissionReport  （纯函数，可单元测试）
 很容易被后续重构破坏（比如有人图省事只传 `runSignal`），
 而破坏了不会有任何报错，只会让停机悄悄失效。
 
-#### ③ 配置面：`Settings` 补齐三项
+#### ③ 配置面：默认值只在 `Settings` 里
 
 `maxEngineInflight`（默认 4）/ `headless`（默认 true）/ `tracing`（默认 true）
-现在都有来源，对应 `JEVTEST_ENGINE_INFLIGHT` / `JEVTEST_HEADLESS` / `JEVTEST_TRACING`。
+对应 `JEVTEST_ENGINE_INFLIGHT` / `JEVTEST_HEADLESS` / `JEVTEST_TRACING`。
 
-`PoolOptions` **不再有自己的默认值兜底**——在池里再写一遍默认值会出现
+`PoolOptions` **没有自己的默认值兜底**——在池里再写一遍默认值会出现
 「改了环境变量却没生效」这种最难查的问题。字段名与 `Settings` 一一对应，
 映射在调用处完成。
 
@@ -660,35 +648,26 @@ admit(stats, case)  -> AdmissionReport  （纯函数，可单元测试）
 | 模型调用 | **6 次**（5 次决策，其中 1 次重试；另 1 次是文本取值） |
 | token | **33,859 input / 2,663 output** |
 | 墙钟耗时 | **5.0 ~ 5.7 秒**（4 次连续运行） |
-| 成本 | **未知**——TypeSafe 的响应里没有金额字段，因此 `costUsd` 报 `null` 而不是 0（若要按金额设上限，需要先补上这个映射） |
+| 成本 | **未知**——TypeSafe 的响应里没有金额字段，因此 `costUsd` 报 `null` 而不是 0 |
 | 准入警告 | 1 条（检测到 2 个嵌套滚动容器） |
 
 与上游「17 次请求 / 90,558 input tokens / 7.1 秒」相比，量级一致、方向更好：
 本项目是一问多题（一次往返问操作 + 各目标），因此决策次数与 token 都更省。
 
-**这道闸抓到的三个真实缺陷**（全部是离线测试与类型检查看不见的，已各配回归测试）：
-
-| # | 现象 | 根因 |
-| --- | --- | --- |
-| 1 | 第一次真跑直接 400 `api_usage_error: Invalid request.` | 请求体的 `questions` 形状与上游不符：`criteria` 应是**以候选 id 为键的对象**（operation 下甚至是「id → 一句操作说明」），`instructions` 要带 `goal`，且 `rules` 在 operation 问题上是字符串、在 target 问题上是数组。我们的 `budget` 顶层字段上游没有，一并去掉 |
-| 2 | 输入之后点提交，整轮运行被判 `status: error` | `act()` 抛出的 `StalePage`（页面在决策与输入之间变了——我们自己的输入触发了候选列表渲染）被当成运行故障。按 §6.4 它应当只是「这次决策作废、重新观测」 |
-| 3 | 点提交后跳转，下一次观测直接抛错 | 观测撞上「旧文档已卸载、新文档还没 body」的窗口，`snapshot.js` 返回 null 被当成致命错误。观测是纯读，应当等文档就绪后重读 |
-
-> 第 1 条还顺带说明了一件事：**认证通过（401 → 拿到真响应）不代表请求是对的**。
-> 服务端对形状错误只回一句 `Invalid request.`，不说是哪个字段——
-> 这类的排查成本几乎全在客户端。形状对齐后，回归测试里直接断言请求体的
-> `criteria` / `instructions` 结构，避免再次静默漂移。
+> **认证通过（401 → 拿到真响应）不代表请求是对的。** TypeSafe 对请求体形状错误只回一句
+> `Invalid request.`，不说是哪个字段。`tests/engine.test.ts` 因此直接断言请求体的
+> `criteria` / `instructions` 结构，防止再次静默漂移。
 
 #### 仍未验证
 
 | 事项 | 状态 |
 | --- | --- |
 | TypeSafe 是否报金额 | 实测**没有**。要么是响应里用别的字段名（需核），要么这一版 API 就不报——在此之前成本类断言只能靠 `null` 跳过 |
-| `cases/wikipedia-godel.yaml` 的更多次重复 | 已连跑 4 次全绿，但**样本太小**：README 建议的 5 次还没跑满，也还没试过在慢网络/大页面下的表现 |
-| 其他用例（含输入、下拉、复选框、断言更严的） | 未跑过。目前只有一个用例过了这道闸 |
+| `cases/wikipedia-godel.yaml` 的更多次重复 | 已连跑 4 次全绿，但**样本太小**，也还没试过在慢网络/大页面下的表现 |
+| 其他用例（含下拉、复选框、断言更严的） | 未跑过。目前只有种子用例真跑过 |
 | Playwright 自带 Chromium 与真实 Chrome 的行为差异 | 未知。内部 staging 无所谓，测三方站点时是第一个会踩的坑 |
 | `--enable-automation` 特征是否被站点检测 | 未验证。同上（Wikipedia 未拦） |
 | 轮询在长运行（>5 分钟）下的体验 | 未验证。若不够，再考虑 SSE |
-| shadow DOM 递归 / 跨 iframe | P1 计划，尚未实现，因此仍在「不支持」清单里 |
-| 用例 revision diff 视图 | P1 |
-| 多引擎一致性投票 | P2 |
+| shadow DOM 递归 / 跨 iframe | 尚未实现，因此仍在「不支持」清单里 |
+| 用例 revision diff 视图 | 未实现 |
+| 多引擎一致性投票 | 未实现 |

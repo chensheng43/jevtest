@@ -184,7 +184,7 @@ quality.maxInputTokens
 | 导出 | 实现 | 用途 |
 | --- | --- | --- |
 | Markdown | `toMarkdown(report)` | 贴进 PR 或 issue |
-| JUnit XML | `toJUnit(reports)` | CI 消费（P1） |
+| JUnit XML | `toJUnit(reports)` | CI 消费（**尚未实现**，导出端点回 501） |
 
 Markdown 摘要**必须**包含：结论、每条断言的实际值与期望、步数与成本、trace 的打开方式。
 失败时还要带上最终页面 URL 与关键元素的可见值——没有这些，一份失败报告对排查毫无帮助。

@@ -203,5 +203,5 @@ switch 分支与 `schema/events.ts` 的判别联合一一对应。
 | --- | --- |
 | 登录态管理（`storageState` 上传/复用） | 底层能力已规划，无端点与用例字段 |
 | 套件（一组用例）的增删改 | 无。`suiteRunId` 只是批量运行的关联 id，不是持久化实体 |
-| 用例 revision 的 diff 视图 | P1 |
+| 用例 revision 的 diff 视图 | 未实现 |
 | 权限 / 多用户 | 无。单机工具，靠 §2 的三重守卫保护 |

@@ -28,13 +28,13 @@
 
 ### 1. Shadow DOM
 
-**状态：不支持（P1 计划）**
+**状态：不支持（计划中）**
 
 `snapshot.js` 只遍历主文档的 `document.querySelectorAll`，不递归
 `element.shadowRoot`。因此 Web Components 内部的控件**根本不会进入元素表**，
 agent 看不见它们。
 
-P1 计划加约 10 行递归支持。届时需要考虑：
+计划加约 10 行递归支持。届时需要考虑：
 
 - 递归深度上限（嵌套 shadow root 可能很深）；
 - 与 `identity()` 的配合——WeakMap 对 shadow 内的节点一样有效；
@@ -42,7 +42,7 @@ P1 计划加约 10 行递归支持。届时需要考虑：
 
 ### 2. 跨域 iframe
 
-**状态：不支持（P1 计划用 `f1:e7` 形式支持同源）**
+**状态：不支持（计划用 `f1:e7` 形式支持同源）**
 
 跨域 iframe 内的 DOM 受同源策略保护，`page.evaluate` 在主文档上下文里读不到。
 目前只覆盖主文档。
@@ -150,7 +150,7 @@ P1 计划加约 10 行递归支持。届时需要考虑：
 
 | 检查 | 结论 |
 | --- | --- |
-| 目标控件在 shadow DOM 里？ | 🚫 blocking（P1 后重估） |
+| 目标控件在 shadow DOM 里？ | 🚫 blocking（支持后重估） |
 | 目标控件在跨域 iframe 里？ | 🚫 blocking |
 | 页面是 canvas / WebGL 渲染的？ | 🚫 blocking |
 | 需要上传文件？ | 🚫 blocking |

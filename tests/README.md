@@ -16,7 +16,7 @@ npm test
 （见 `fixtures/site/`），不访问外网。外网的 Wikipedia 用例只有显式设置
 `JEVTEST_E2E=1` 时才跑。
 
-## 已收录（486 项）
+## 覆盖内容
 
 | 文件 | 覆盖内容 |
 | --- | --- |
@@ -53,8 +53,7 @@ npm run walkthrough     # 自己起服务、自己收摊，用临时用例库，
 
 它用真 Chromium 走一遍导入、编辑、断言增删、保存后重载、校验标红、结果页分档、
 深色模式与行内删除，并收集控制台/网络报错，截图落在临时目录。这不是 `npm test`
-的一部分（要真浏览器、要几十秒），而是 README 待办里那条「人工点一遍 `jevtest serve`」
-的脚本化版本——它已经抓到过三个真缺陷（见 `docs/decisions.md` D19 末尾）。
+的一部分（要真浏览器、要几十秒）。改了界面之后跑一遍。
 
 需要真 Chromium。没装时整组**显式跳过**（`npx playwright install chromium`），
 而不是让 `npm test` 变红——环境缺浏览器与代码坏掉是两回事。
