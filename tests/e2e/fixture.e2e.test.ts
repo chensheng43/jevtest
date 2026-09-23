@@ -384,6 +384,23 @@ e2e("观测：没有 role、只靠 cursor:pointer 可点的菜单项也进候选
   });
 });
 
+e2e("观测：只露出一截的按钮按露出部分的中心进候选、能点中；完全在视口外的仍然不收", async () => {
+  // 这条来自一次真跑：类目弹层的「确定」只露出几像素，中心点落在 iframe 视口外，整个不进候选集。
+  // 模型不知道还有这一步，选完类目直接点了顶栏「保存」，弹层关掉、选择没提交。
+  await wiring.pool.withSession({ tracing: false }, async (session) => {
+    const page = await session.goto(`${fixture.url}/clipped.html`, { waitUntil: "domcontentloaded" });
+    const labels = page.actions.map((action) => action.label);
+    const confirm = page.actions.find((action) => action.label === "确定");
+    assert.ok(confirm !== undefined, `只露出一截的按钮应当进候选集：${labels.join(" | ")}`);
+    assert.equal(labels.includes("取消"), false, `完全在视口外的按钮不该进候选集：${labels.join(" | ")}`);
+
+    // 执行前的解析与观测同一条标准：点露出的那截，而不是报 offscreen
+    await session.act(confirm, page);
+    const after = await session.observe();
+    assert.match(after.text, /已确认/);
+  });
+});
+
 e2e("观测：页面提示（toast / alert）单独收进 notices，常驻公告、读屏区域、已关的 toast 不收", async () => {
   // 这条来自一次真跑：「请输入SKU」的 toast 混在几千字正文里、与同名占位符分不开，模型连点了四次「确定」。
   await wiring.pool.withSession({ tracing: false }, async (session) => {

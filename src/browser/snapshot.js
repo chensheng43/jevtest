@@ -5,7 +5,7 @@
  * (https://github.com/browser-use/jev-ultrafast, MIT License, Copyright (c) 2026 Browser Use)
  * 详见 NOTICE。
  *
- * 相对原版只有七处改动：
+ * 相对原版只有八处改动：
  *   1. 全局缓存名 `window.__jevFast` -> `window.__jev`。
  *   2. 本文件头（原文无）。
  *   3. 候选集收集时加一次 `elementFromPoint` 命中测试（行内标了 `jevtest:`）。
@@ -22,6 +22,8 @@
  *   7. 同源 iframe（行内标了 `jevtest:`）：本脚本在每个同源 frame 里各跑一次，
  *      子 frame 里的候选几何换算到**顶层视口**坐标，命中测试逐层做到顶层；额外返回 `frame`。
  *      主文档里这些都是恒等变换，行为与上游一致。拼装各 frame 的结果是 playwright-session.ts 的事。
+ *   8. 点击点取元素与视口交集的中心（`point`，行内标了 `jevtest:`）。上游取元素中心，
+ *      只露出一截、中心在视口外的元素整个不进候选；输入前的解析同步改了。
  * 其余逐字保留——包括变量命名风格，**这是刻意的**：
  * 上游若修复了可访问名解析或守卫语义，我们能直接 diff 而不必重新推导。
  *
@@ -38,7 +40,7 @@
  *      节点被替换会拿到新身份，导航会重置缓存——这就是「陈旧」的定义。
  *
  *   2. **只暴露可见、可点、在视口内、未被遮挡的元素**。`checkVisibility` 加几何判断
- *      加中心点命中测试，离屏或被盖住的元素直接不进候选集，模型不会浪费时间点一个点不到的东西。
+ *      加点击点命中测试，离屏或被盖住的元素直接不进候选集，模型不会浪费时间点一个点不到的东西。
  *      命中测试与输入前那次（playwright-session.ts 的 resolveTargetInPage）是**同一条标准**：
  *      这里排除的元素，输入前也一定会被拦下（除非页面在两者之间变了）。
  *
@@ -77,6 +79,14 @@
     dx+=r.x+f.clientLeft+parseFloat(s.paddingLeft); dy+=r.y+f.clientTop+parseFloat(s.paddingTop);
     chain.push({f,win:w.parent,dx,dy});
   }
+  // jevtest: 点击点取「元素与视口的交集」的中心，而不是元素中心。一次真跑里类目弹层的「确定」
+  // 只露出底下几像素、中心落在 iframe 视口外，被整个丢掉；模型不知道还有这一步，选完类目
+  // 直接点了顶栏「保存」，弹层关掉、选择没提交。完全在视口外的仍然不收；露出的那一截
+  // 照旧要过命中测试。playwright-session.ts 的 resolveTarget 用同一个点，两边必须一致。
+  const point = r => {
+    const l=Math.max(r.left,0), t=Math.max(r.top,0), rr=Math.min(r.right,innerWidth), b=Math.min(r.bottom,innerHeight);
+    return rr>l && b>t ? {x:(l+rr)/2,y:(t+b)/2} : null;
+  };
   const reachable = (x,y) => chain.every(({f,win,dx:ox,dy:oy}) => {
     const px=x+ox, py=y+oy;
     return px>=0 && py>=0 && px<win.innerWidth && py<win.innerHeight && win.document.elementFromPoint(px,py)===f;
@@ -177,9 +187,10 @@
   const picked=[];
   for (const e of document.querySelectorAll(selector)) {
     if (!safe(e) || !visible(e) || e.matches(':disabled') || e.closest('[aria-disabled="true"]')) continue;
-    const r=e.getBoundingClientRect(), x=r.x+r.width/2, y=r.y+r.height/2, rname=role(e);
-    if (!rname || r.width<=0 || r.height<=0 || x<0 || y<0 || x>=innerWidth || y>=innerHeight) continue;
-    // jevtest: 中心点被盖住（浮层、弹窗底栏、滚动容器裁掉）就点不到，不进候选集
+    const r=e.getBoundingClientRect(), p=point(r), rname=role(e);
+    if (!rname || !p) continue;
+    const {x,y}=p;
+    // jevtest: 点击点被盖住（浮层、弹窗底栏、滚动容器裁掉）就点不到，不进候选集
     const hit=document.elementFromPoint(x,y);
     if (!hit || (hit!==e && !e.contains(hit)) || !reachable(x,y)) continue;
     if (rname==='gridcell' && e.querySelector('button,[role="button"]')) continue;
@@ -196,8 +207,9 @@
   const pointer = e => !!e && getComputedStyle(e).cursor==='pointer';
   for (const e of document.body.querySelectorAll('*')) {
     if (taken.has(e) || covering.has(e)) continue;
-    const r=e.getBoundingClientRect(), x=r.x+r.width/2, y=r.y+r.height/2;
-    if (r.width<=0 || r.height<=0 || x<0 || y<0 || x>=innerWidth || y>=innerHeight) continue;
+    const r=e.getBoundingClientRect(), p=point(r);
+    if (!p) continue;
+    const {x,y}=p;
     if (!pointer(e) || pointer(e.parentElement)) continue;
     let inside=false;
     for (let p=e.parentElement; p && !inside; p=p.parentElement) inside=taken.has(p);

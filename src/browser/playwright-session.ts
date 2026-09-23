@@ -508,13 +508,17 @@ function resolveTargetInPage(arg: {
 
   const rect = el.getBoundingClientRect();
   if (rect.width <= 0 || rect.height <= 0) return { ok: false, reason: "zero-size" };
-  const x = rect.x + rect.width / 2;
-  const y = rect.y + rect.height / 2;
-  if (x < 0 || y < 0 || x >= g.innerWidth || y >= g.innerHeight) {
-    return { ok: false, reason: "offscreen" };
-  }
+  // 点击点是「元素与视口的交集」的中心，与 snapshot.js 的 point() 同一条标准：
+  // 只露出一截的元素（弹层底部的「确定」）点露出的那截；完全在视口外才算 offscreen。
+  const left = Math.max(rect.x, 0);
+  const top = Math.max(rect.y, 0);
+  const right = Math.min(rect.x + rect.width, g.innerWidth);
+  const bottom = Math.min(rect.y + rect.height, g.innerHeight);
+  if (right <= left || bottom <= top) return { ok: false, reason: "offscreen" };
+  const x = (left + right) / 2;
+  const y = (top + bottom) / 2;
 
-  // 命中测试：中心点上最顶层的元素必须还是它（或它的后代）。
+  // 命中测试：点击点上最顶层的元素必须还是它（或它的后代）。
   // 这是 locator.click() 替我们做掉、而我们**必须自己做**的那一步（见文件头第 1 条）。
   const hit = g.document.elementFromPoint(x, y);
   if (!hit || (hit !== el && !el.contains(hit))) return { ok: false, reason: "occluded" };
@@ -1412,7 +1416,7 @@ function describeBlocked(reason: string): string {
     case "offscreen":
       return "元素已移出视口";
     case "occluded":
-      return "元素中心点被别的元素盖住（elementFromPoint 命中到了它人）";
+      return "元素点击点被别的元素盖住（elementFromPoint 命中到了它人）";
     case "option-missing":
       return "要找的 option 已经不在这个下拉里了";
     case "option-disabled":
