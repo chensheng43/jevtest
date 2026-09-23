@@ -54,8 +54,9 @@ POST /api/runs {caseIds: ["wikipedia-godel"]}
   ├─ 1. 读 cases/wikipedia-godel/case.yaml -> CaseDefinition.parse() -> Case（默认值已填充）
   │     计算 caseDigest，分配 runId
   │
-  ├─ 2. enqueue：把用例**冻结**复制到 runs/<runId>/case.yaml
-  │     （此后编辑用例不影响在途运行，报告也自包含）
+  ├─ 2. enqueue：runner 持有这一刻的 Case，之后一直用它
+  │     （此后编辑用例不影响在途运行；报告落盘时把**这一份**冻结到
+  │      runs/<runId>/case.yaml，revision 按 digest 反查，报告因此自包含）
   │
   └─ 3. worker 从 AsyncQueue 取出
         │

@@ -119,8 +119,12 @@ export interface CaseStore {
    *
    * 返回的 `CaseRevision` 会被写进报告的 `caseRevision` / `caseDigest`，
    * 因此事后翻出一份旧报告能精确回到产生它的用例版本（D13）。
+   *
+   * 给了 `ran`（实际跑的那份 `Case`）时，冻结的是它而不是仓库的当前版本，
+   * revision 按 digest 在历史版本里反查——运行期间用例被改过，报告也不会指错版本。
+   * 历史里找不到同 digest 的版本时 revision 记 0。
    */
-  freeze(caseId: string, destination: string): Promise<CaseRevision>;
+  freeze(caseId: string, destination: string, ran?: Case): Promise<CaseRevision>;
 
   /** 从 title 生成不冲突的 id。冲突时追加 `-2`、`-3`…… */
   allocateId(title: string): Promise<string>;
@@ -538,23 +542,44 @@ export function createCaseStore(options: CaseStoreOptions): CaseStore {
     return stringifyCase(explicitOnly({ ...stored.doc, id }, stored.parsed) as CaseDefinition);
   }
 
-  async function freeze(caseId: string, destination: string): Promise<CaseRevision> {
+  async function freeze(caseId: string, destination: string, ran?: Case): Promise<CaseRevision> {
     return serialized(async () => {
       const id = requireCaseId(caseId);
       const stored = await loadStoredCase(id);
+      // 身份统一取目录名（见 loadStoredCase），digest 才与仓库里的对得上
+      const frozen = ran === undefined ? stored.parsed : { ...ran, id };
+      const digest = caseDigest(frozen);
       // **冻结写完整的 Case**（默认值一并落盘）：报告是长期留存的物证，
       // 将来改了默认值也不能让旧报告变得无法解释（D13）
-      const text = stringifyCase(stored.parsed);
+      const text = stringifyCase(frozen);
       // destination 是**文件路径**（`runs/<runId>/case.yaml`），不是目录
       await mkdir(dirname(destination), { recursive: true });
       await writeFileAtomic(destination, text);
       return {
         caseId: id,
-        revision: await currentRevision(id),
-        digest: caseDigest(stored.parsed),
+        revision:
+          ran === undefined || caseDigest(stored.parsed) === digest
+            ? await currentRevision(id)
+            : await revisionWithDigest(id, digest),
+        digest,
         savedAt: stored.savedAt,
       };
     });
+  }
+
+  /** 从新到旧找 digest 相同的历史版本；找不到返回 0（「对不上任何已保存版本」）。 */
+  async function revisionWithDigest(caseId: string, digest: string): Promise<number> {
+    const numbers = [...(await revisionNumbers(caseId))].sort((a, b) => b - a);
+    for (const n of numbers) {
+      try {
+        const text = await readFile(revisionFilePath(caseId, n), "utf8");
+        const { parsed } = parseCaseDocument(text, revisionFilePath(caseId, n));
+        if (caseDigest({ ...parsed, id: caseId }) === digest) return n;
+      } catch {
+        // 某一版读不出来（手工改坏、迁移失败）不影响继续往前找
+      }
+    }
+    return 0;
   }
 
   function allocateId(title: string): Promise<string> {

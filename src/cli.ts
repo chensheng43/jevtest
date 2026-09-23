@@ -200,36 +200,29 @@ export function createWiring(
    * `runId` / `suiteRunId`，而 `caseRevision` / `caseDigest` 只有同时看得见
    * 用例仓库与报告目录的这里才算得出来（`RunnerDeps.persist` 正是为此留的注入点）。
    */
-  const persist = async (report: CaseRunReport): Promise<void> => {
+  const persist = async (report: CaseRunReport, ran: Case): Promise<void> => {
     const reportDir = join(settings.runsDir, report.runId);
     await mkdir(reportDir, { recursive: true });
-    const snapshotPath = join(reportDir, "case.yaml");
+    const snapshotPath = join(reportDir, FROZEN_CASE_FILE);
 
     try {
-      // 仓库里的用例：冻结一份快照，顺带拿到 revision 与 digest。
-      // 第二参数是**文件路径**（不是目录），常量由 store 导出以免两处各写一遍 "case.yaml"。
-      const revision = await store.freeze(report.caseId, join(reportDir, FROZEN_CASE_FILE));
+      // 仓库里的用例：冻结**实际跑的那份**（入队时的 Case），revision 按 digest 反查。
+      // 冻结仓库的当前版本是错的：运行期间用例被改过的话，报告会指向一个没跑过的版本。
+      const revision = await store.freeze(report.caseId, snapshotPath, ran);
       report.caseRevision = revision.revision;
       report.caseDigest = revision.digest;
     } catch (error) {
+      // 仓库里读不到：文件形态的一次性运行，或用例在运行期间被删掉/改坏了。
+      // 手里都有实际跑的那份 Case，快照照写；revision 记 0（「未入库 / 对不上库里的版本」）。
+      // 这里不能往外抛：报告本身比快照重要，快照出问题也要让下面的报告落盘。
       const snapshot = fileSnapshots.get(report.caseId);
-      if (snapshot !== undefined) {
-        // 文件形态的一次性运行：不在仓库里，revision 记 0（「未入库」），
-        // 但 digest 照算——报告仍然能精确指回当时那份 YAML 的字节。
-        await writeFile(snapshotPath, snapshot.yaml, "utf8");
-        report.caseRevision = 0;
-        report.caseDigest = snapshot.digest;
-      } else {
-        // 用例在运行期间被删掉了。留一份**说明性**的快照而不是让报告目录残缺：
-        // 报告里指着 case.yaml，那个文件就该存在，哪怕内容是在解释它为什么没了。
-        await writeFile(
-          snapshotPath,
-          `# 用例快照不可用：${report.caseId} 在本次运行期间被删除或被移动。\n` +
-            `# 报告其余部分仍然有效。\n`,
-          "utf8",
-        );
+      await writeFile(snapshotPath, snapshot?.yaml ?? stringifyCase(ran), "utf8");
+      report.caseRevision = 0;
+      report.caseDigest = snapshot?.digest ?? caseDigest(ran);
+      if (snapshot === undefined) {
         console.warn(
-          `[jevtest] 警告：用例 ${report.caseId} 在运行期间不可读（${error instanceof Error ? error.message : String(error)}），报告未内嵌快照。`,
+          `[jevtest] 警告：用例 ${report.caseId} 在仓库里不可读（${error instanceof Error ? error.message : String(error)}），` +
+            `快照取自运行时的那份定义。`,
         );
       }
     }

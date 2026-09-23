@@ -146,6 +146,8 @@ interface Harness {
   events: RunEvent[];
   /** `persist` 收到的报告，按落盘顺序 */
   reports: CaseRunReport[];
+  /** `persist` 收到的「实际跑的那份」用例，与 reports 一一对应 */
+  ranCases: Case[];
   engines: EngineRecord[];
   settings: Settings;
 }
@@ -171,6 +173,7 @@ function makeHarness(input: {
   });
   const events: RunEvent[] = [];
   const reports: CaseRunReport[] = [];
+  const ranCases: Case[] = [];
   const engines: EngineRecord[] = [];
   const pool = new FakePool(
     input.session ??
@@ -208,8 +211,9 @@ function makeHarness(input: {
         },
       };
     },
-    persist: async (report) => {
+    persist: async (report, ran) => {
       reports.push(report);
+      ranCases.push(ran);
       if (input.persistError !== undefined) throw input.persistError;
     },
     events: {
@@ -219,7 +223,7 @@ function makeHarness(input: {
     },
   });
 
-  return { runner, pool, events, reports, engines, settings };
+  return { runner, pool, events, reports, ranCases, engines, settings };
 }
 
 function clickLink(): ScriptedStep {
@@ -373,6 +377,16 @@ test("批量入队：共用 suiteRunId，每个用例一个引擎实例，并发
   assert.equal(harness.runner.status().contextsActive, 0);
 
   harness.runner.cancelAll();
+  await harness.runner.stop();
+});
+
+test("persist 拿到的是入队时的那份用例（快照要冻结实际跑的版本）", async () => {
+  const harness = makeHarness({});
+  harness.runner.start();
+  const caseDef = makeCase({ goal: "入队时的目标" });
+  await runAll(harness, [caseDef]);
+  assert.equal(harness.ranCases.length, 1);
+  assert.equal(harness.ranCases[0], caseDef, "必须是入队时那个对象，而不是事后从仓库重读的");
   await harness.runner.stop();
 });
 

@@ -150,7 +150,7 @@ export interface RunnerDeps {
   /** 由 registry.createEngine 按用例构造引擎。每个用例一个实例，跑完 close */
   createEngine: (caseDef: Case) => DecisionEngine;
   /** 报告落盘 */
-  persist: (report: CaseRunReport) => Promise<void>;
+  persist: (report: CaseRunReport, ran: Case) => Promise<void>;
   events: EventSink;
 }
 
@@ -277,7 +277,8 @@ export function createRunnerService(deps: RunnerDeps): RunnerService {
     active.reported = true;
 
     try {
-      await deps.persist(report);
+      // 交出去的是**入队时的那份** caseDef：快照要冻结实际跑的版本，不是仓库此刻的版本
+      await deps.persist(report, active.caseDef);
     } catch (error) {
       deps.events.emit({
         type: "run.log",

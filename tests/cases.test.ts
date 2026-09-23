@@ -647,6 +647,33 @@ describe("freeze 冻结用例到运行目录", () => {
     assert.ok((await readFile(destination, "utf8")).includes("改过之后冻结"));
   });
 
+  it("给了实际跑的 Case：冻结它而不是仓库当前版本，revision 按 digest 反查", async (t) => {
+    const lib = await makeLibrary(t);
+    await lib.store.write(definition({ id: "flights", goal: "入队时的目标" }));
+    // 入队时读到的那份（r1），随后用户在界面上改了用例（r2），运行才结束
+    const ran = CaseDefinitionSchema.parse((await lib.store.read("flights")).def);
+    await lib.store.write(definition({ id: "flights", goal: "运行途中改过" }), { expectedRevision: 1 });
+
+    const destination = join(lib.runsDir, "run-1", "case.yaml");
+    const frozen = await lib.store.freeze("flights", destination, ran);
+
+    const bytes = await readFile(destination, "utf8");
+    assert.ok(bytes.includes("入队时的目标"), `快照必须是实际跑的那份：\n${bytes}`);
+    assert.ok(!bytes.includes("运行途中改过"));
+    assert.equal(frozen.revision, 1, "revision 要指回实际跑的那一版，不是仓库此刻的 r2");
+    assert.equal(frozen.digest, caseDigest(ran));
+  });
+
+  it("实际跑的 Case 对不上任何已保存版本时 revision 记 0", async (t) => {
+    const lib = await makeLibrary(t);
+    await lib.store.write(definition({ id: "flights" }));
+    const ran = CaseDefinitionSchema.parse(definition({ id: "flights", goal: "从没保存过的内容" }));
+
+    const frozen = await lib.store.freeze("flights", join(lib.runsDir, "run-1", "case.yaml"), ran);
+    assert.equal(frozen.revision, 0);
+    assert.equal(frozen.digest, caseDigest(ran));
+  });
+
   it("冻结不存在的用例抛 CaseNotFound", async (t) => {
     const lib = await makeLibrary(t);
     await assert.rejects(
