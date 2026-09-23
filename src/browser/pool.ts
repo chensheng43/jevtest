@@ -48,6 +48,11 @@ export interface PoolOptions {
   maxEngineInflight: number;
   /** 来自 `settings.headless` */
   headless: boolean;
+  /**
+   * 测试注入点：替换真正的 `chromium.launch`。生产不传。
+   * 浏览器崩溃后能否自动重启，只能靠一个可控的假 Browser 来验。
+   */
+  launchBrowser?: (headless: boolean) => Promise<Browser>;
 }
 
 export interface ContextOptions {
@@ -125,7 +130,9 @@ export function createBrowserPool(options: PoolOptions): BrowserPool {
     try {
       // 不传任何自定义 args：加了会让本地与 CI 的浏览器行为分叉，而目前没有
       // 证据表明这里需要它。真需要时应该连同平台判断一起加，并写清理由。
-      return await chromium.launch({ headless: options.headless });
+      return options.launchBrowser !== undefined
+        ? await options.launchBrowser(options.headless)
+        : await chromium.launch({ headless: options.headless });
     } catch (error) {
       throw new JevtestError(
         `启动 Chromium 失败：${describe(error)}。` +
@@ -136,7 +143,11 @@ export function createBrowserPool(options: PoolOptions): BrowserPool {
   }
 
   function ensureBrowser(): Promise<Browser> {
-    if (browser !== null) return Promise.resolve(browser);
+    // 浏览器进程死掉（崩溃、被 OOM killer 杀掉）之后 `browser` 仍非空：不检查连接的话，
+    // 池会在进程余下的生命周期里一直把这个死实例交出去，之后每次 newContext 都失败，
+    // 所有运行都判 error，只能重启服务。
+    if (browser !== null && browser.isConnected()) return Promise.resolve(browser);
+    browser = null;
     if (stopped) {
       // 停机之后再要浏览器，是这个 promise 链的最后一个陷阱：`browser` 已被置空，
       // 不拦住就会在进程退出途中悄悄再拉起一整个 Chromium，而它永远不会被关掉。
@@ -146,6 +157,10 @@ export function createBrowserPool(options: PoolOptions): BrowserPool {
       (instance) => {
         browser = instance;
         launching = null;
+        // 崩溃时立刻放下这个实例，下一次借用会重新启动一个（见 ensureBrowser）
+        instance.on("disconnected", () => {
+          if (browser === instance) browser = null;
+        });
         return instance;
       },
       (error: unknown) => {
