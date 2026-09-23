@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 /**
  * 命令行入口。
  *
@@ -35,7 +36,7 @@
  */
 
 import { access, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -299,13 +300,10 @@ function applyFlags(settings: Settings, flags: Record<string, string | boolean>)
  */
 async function commandServe(argv: ParsedArgs): Promise<number> {
   const settings = applyFlags(loadSettings(), argv.flags);
-  const pool = createBrowserPool({
-    maxContexts: settings.workers,
-    maxEngineInflight: settings.maxEngineInflight,
-    headless: settings.headless,
-  });
   // serve 不跑文件形态用例，快照表留空——仓库里的用例走 store.freeze。
-  const { runner, services } = createWiring(settings, new Map());
+  // 浏览器池只用 createWiring 里那一个：runner 与 /admit 借的都是它，
+  // 在这里另建一个的话，预热的是一个没人用的 Chromium。
+  const { runner, pool, services } = createWiring(settings, new Map());
 
   const security = {
     token: createToken(),
@@ -946,6 +944,19 @@ async function main(argv: string[]): Promise<number> {
 }
 
 /**
+ * 经 npm 的 bin 软链启动时，argv[1] 是软链路径（如 node_modules/.bin/jevtest），
+ * 而 import.meta.url 是解析后的真实路径——不先 realpath 的话两者永远不相等，
+ * 进程什么都不做就以退出码 0 结束。
+ */
+function realpathOr(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return path;
+  }
+}
+
+/**
  * 只在**被直接执行**时进入 main。
  *
  * 本文件同时是「装配入口」：e2e 测试要复用 `createWiring`，跑同一套接线。
@@ -957,7 +968,7 @@ async function main(argv: string[]): Promise<number> {
  */
 const invokedDirectly =
   process.argv[1] !== undefined &&
-  import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
+  import.meta.url === pathToFileURL(realpathOr(resolve(process.argv[1]))).href;
 
 if (invokedDirectly) {
   process.exitCode = await main(process.argv.slice(2));
