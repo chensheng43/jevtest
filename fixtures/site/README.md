@@ -39,7 +39,7 @@
 | `notices.html` | 页面提示：自造的 fixed toast（`#msg-mini.msgno`，无 role）、`role=alert` 的表单校验、嵌套的 toast 组；以及不该收的：整宽常驻公告、1px 读屏 live 区域、`display:none` 的 toast、非浮层的 `message-list` |
 | `clipped.html` | 只露出上沿 10px 的按钮（中心点在视口外）与完全在视口外的按钮，给「点击点取元素与视口交集的中心」用 |
 | `late.html` + `late.json` | 按钮在 DOMContentLoaded 之后由一次慢接口（`?delay=800`）拉回来，给「打开起始页先等网络安静」用 |
-| `dialog.html` + `dialog.json` | 点按钮后弹窗外壳立刻出现、SKU 选项等慢接口回来才渲染，给「动作之后等页面安静」用；另有一个 5s 才回的「刷新统计」，验证等待按上限放行 |
+| `dialog.html` + `dialog.json` | 点按钮后弹窗外壳立刻出现、SKU 选项等慢接口回来才渲染，给「动作之后等页面安静」用；另有一个 4s 才回的「刷新统计」，验证超过 3s 的接口也等它回来；「开始轮询」接连发请求，验证不追着轮询等 |
 | `iframe-modal.html` + `iframe-form.html` + `iframe-ready.js` | 点「+ 添加产品」后弹出遮罩与弹窗，弹窗里的 iframe 文档是个慢请求（`?delay=600`）；iframe 里有输入框、原生下拉、首屏之下的「保存模板」，以及一个被父文档浮层盖住的按钮。给同源 iframe 的观测、执行、滚动与逐层命中测试用。`iframe-modal.html?src=` 覆写 iframe 地址；`iframe-form.html?ready=<ms>` 让整页先隐藏、等慢脚本到了才显示（加载中的白屏） |
 | `table.html` | 无名复选框：`<thead>` 全选框 + 三行数据、ARIA 网格（`columnheader` / `gridcell`），以及有 label 的、不在行里的对照组 |
 

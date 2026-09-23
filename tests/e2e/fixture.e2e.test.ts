@@ -475,18 +475,29 @@ e2e("动作之后：等动作引出的接口回来再观测，弹窗里晚到的
   });
 });
 
-e2e("动作之后：动作引出的请求迟迟不回时按上限放行，不挂住运行", async () => {
+e2e("动作之后：动作引出的请求超过 3s 才回，也等它回来、结果渲染出来再观测", async () => {
+  // 这条来自一次真跑：点「确定」导入产品，接口 3s 还没回，观测落在「正在导入，请稍候」，
+  // 模型据此回了 DONE，浏览器随即关掉，「导入产品库成功」没等到。
   await wiring.pool.withSession({ tracing: false }, async (session) => {
     const page = await session.goto(`${fixture.url}/dialog.html`, { waitUntil: "domcontentloaded" });
     const slow = page.actions.find((action) => action.label === "刷新统计");
     assert.ok(slow !== undefined);
-    const started = Date.now();
     await session.act(slow, page);
-    const elapsed = Date.now() - started;
-    // 接口 5s 才回，上限 3s：等到上限就放行（留出 evaluate 往返的余量）
-    assert.ok(elapsed < 4_500, `act 用了 ${elapsed}ms，应当在上限附近放行`);
     const after = await session.observe();
-    assert.equal(after.text.includes("统计已刷新"), false, "这时接口确实还没回来");
+    assert.ok(after.text.includes("统计已刷新"), "接口 4s 才回：act 返回时结果应当已经渲染出来");
+  });
+});
+
+e2e("动作之后：动作引出接连不断的轮询时不追着等，按上限放行", async () => {
+  await wiring.pool.withSession({ tracing: false }, async (session) => {
+    const page = await session.goto(`${fixture.url}/dialog.html`, { waitUntil: "domcontentloaded" });
+    const poll = page.actions.find((action) => action.label === "开始轮询");
+    assert.ok(poll !== undefined);
+    const started = Date.now();
+    await session.act(poll, page);
+    const elapsed = Date.now() - started;
+    // 3s 窗口到点后只等当时在途的那一个（500ms），再等一轮 DOM 静止；之后发出的轮询不再等
+    assert.ok(elapsed < 5_000, `act 用了 ${elapsed}ms，不该追着轮询一直等`);
   });
 });
 

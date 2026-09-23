@@ -12,8 +12,10 @@
 <body>
   <h1>产品采集</h1>
   <button type="button" id="open">导入eBay产品库</button>
-  <!-- 动作引出的请求迟迟不回：动作之后的等待必须按上限放行，而不是一直挂着 -->
+  <!-- 动作引出的请求 3s 之后才回：动作之后要等它回来、结果渲染出来再观测 -->
   <button type="button" id="slow">刷新统计</button>
+  <!-- 动作之后接连发出的轮询：不追着新请求等，按上限放行 -->
+  <button type="button" id="poll">开始轮询</button>
   <p id="stats"></p>
 
   <!-- 来自一次真跑：弹窗外壳（标题 + 关闭 / 确定）立刻出现，SKU 选项等接口回来才渲染 -->
@@ -48,9 +50,13 @@
       modal.hidden = true;
     });
     document.getElementById("slow").addEventListener("click", () => {
-      fetch("dialog.json?delay=5000").then(() => {
+      fetch("dialog.json?delay=4000").then(() => {
         document.getElementById("stats").textContent = "统计已刷新";
       });
+    });
+    document.getElementById("poll").addEventListener("click", () => {
+      const tick = () => fetch("dialog.json?delay=500").then(tick);
+      tick();
     });
   </script>
 </body>

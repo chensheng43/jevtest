@@ -120,10 +120,24 @@ export const LOAD_SETTLE_TIMEOUT_MS = 5_000;
  * 点击当成做过的一步，提前回了 DONE。
  *
  * 只算**动作之后才发出**的请求：页面上原本挂着的长轮询与这次动作无关，
- * 算进来会让每一步都等到上限。上限兜住的是动作本身引出的长连接与持续变动的页面——
+ * 算进来会让每一步都等到上限。上限兜住的是持续变动的页面与动作之后接连发出的轮询——
  * 等不到就按时继续，这只是给下一次观测一个更好的起点，不是运行的闸（同 `LOAD_SETTLE_TIMEOUT_MS`）。
+ * 到点时还没回的那几个请求另按 `SLOW_REQUEST_TIMEOUT_MS` 等。
  */
 export const POST_ACTION_QUIET = { quietMs: 300, timeoutMs: 3_000 } as const;
+
+/**
+ * `POST_ACTION_QUIET` 到点时，动作引出的请求还有没回的：只等**这几个**，上限从动作算起。
+ * 回来之后再等一轮 DOM 静止，让结果（成功提示、报错）渲染出来。
+ *
+ * 为什么需要：提交类接口常常要好几秒。一次真跑里点「确定」导入产品，接口 3s 还没回，
+ * 观测落在按钮还是「正在导入，请稍候」的时候，模型据此回了 DONE，运行随即结束、浏览器关掉，
+ * 「导入产品库成功」没等到，断言失败——而这个接口本身并没有出错。
+ *
+ * 为什么只等到点时在途的那几个：之后新发出的多半是轮询，追下去每一步都会拖到上限。
+ * 真正挂住不回的请求（动作引出的长连接）由上限兜住，按时继续。
+ */
+export const SLOW_REQUEST_TIMEOUT_MS = 30_000;
 
 /**
  * 动作引出一个同源 iframe 的加载时，等它文档回来并触发 `load` 的上限（从动作算起）。
@@ -751,6 +765,9 @@ export function createPlaywrightSession(options: PlaywrightSessionOptions): Sess
   });
   page.on("requestfinished", (request) => inflight.delete(request));
   page.on("requestfailed", (request) => inflight.delete(request));
+  /** 响应头已经到了的请求，见 waitForSlowRequests */
+  const responded = new WeakSet<Request>();
+  page.on("response", (response) => responded.add(response.request()));
 
   /** 序号大于 `since` 的请求（即动作之后才发出的）是否还有没返回的 */
   function pendingSince(since: number): boolean {
@@ -778,7 +795,7 @@ export function createPlaywrightSession(options: PlaywrightSessionOptions): Sess
         deadline = Math.max(deadline, Date.now() + POST_ACTION_QUIET.timeoutMs);
       }
       const remaining = deadline - Date.now();
-      if (remaining <= 0) return;
+      if (remaining <= 0) break;
       const arg = { quietMs: POST_ACTION_QUIET.quietMs, timeoutMs: remaining };
       // 同源 iframe 各等各的：弹窗里的表单渲染发生在 iframe 的文档里，主文档的 MutationObserver 看不到。
       // 子 frame 的失败不往上抛：它可能正从 about:blank 导航到真正的文档，没等上就算了，
@@ -793,6 +810,29 @@ export function createPlaywrightSession(options: PlaywrightSessionOptions): Sess
         await sleep(50);
       }
     }
+    await waitForSlowRequests(since, started + SLOW_REQUEST_TIMEOUT_MS);
+  }
+
+  /**
+   * 见 `SLOW_REQUEST_TIMEOUT_MS`：只等此刻还在途的、动作之后发出的请求，回来后再等一轮 DOM 静止。
+   *
+   * 响应头到了就算回来：页面代码不读响应体的 fetch（`fetch(url).then(() => …)`）永远等不到
+   * `requestfinished`，按它等就会每次都等满上限。页面对这个请求做出反应本来就只能在响应到了之后，
+   * 其后的渲染由那一轮 DOM 静止兜住。
+   */
+  async function waitForSlowRequests(since: number, deadline: number): Promise<void> {
+    const slow: Request[] = [];
+    for (const [request, seq] of inflight) if (seq > since) slow.push(request);
+    if (slow.length === 0) return;
+    while (slow.some((request) => inflight.has(request) && !responded.has(request))) {
+      if (Date.now() >= deadline) return;
+      await sleep(50);
+    }
+    const arg = { quietMs: POST_ACTION_QUIET.quietMs, timeoutMs: POST_ACTION_QUIET.timeoutMs };
+    await Promise.all([
+      guarded(() => page.evaluate(settleQuiet, arg)),
+      ...splitChildFrames().sameOrigin.map((frame) => frame.evaluate(settleQuiet, arg).catch(() => undefined)),
+    ]);
   }
 
   /** 动作之后开始加载、还没等过的同源 iframe */
