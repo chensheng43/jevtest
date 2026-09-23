@@ -79,6 +79,7 @@ export function buildReport(input: {
   passed: boolean | null;
   failureReason: string | null;
   finalUrl: string | null;
+  finalFrame: number | null;
   steps: CaseRunReport["steps"];
   guardrailHits: CaseRunReport["guardrailHits"];
   assertion: CaseRunReport["assertion"];
@@ -110,6 +111,7 @@ export function buildReport(input: {
     goal: input.caseDef.goal,
     startUrl: input.caseDef.startUrl,
     finalUrl: input.finalUrl,
+    finalFrame: input.finalFrame,
 
     steps: input.steps,
     guardrailHits: input.guardrailHits,

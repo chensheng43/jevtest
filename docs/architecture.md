@@ -442,7 +442,9 @@ Playwright 在页面导航时会抛 `Execution context was destroyed` / `Target 
 事件只带 `frame` 序号，前端另外请求 `GET /api/runs/:id/frames/:n.jpg`。
 
 这把单条事件从约 200KB 压到约 400B。上游在导出 trace 时显式剔除
-`page.screenshot`（`app.js` 的 download 逻辑），是同一个直觉。
+`page.screenshot`（上游 `app.js` 的 download 逻辑），是同一个直觉。
+帧由 runner 在每次观测后截取（`JEVTEST_RECORD_FRAMES`，默认开启），语义见
+[`report-format.md` §1](report-format.md)；结果页的轨迹查看器按序号取图（`components/trace.js`）。
 
 ---
 

@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>无语义的可点元素</title>
+  <style>
+    .menu { list-style: none; margin: 0; padding: 0; border: 1px solid #ddd; width: 180px; }
+    .menu li { cursor: pointer; line-height: 28px; padding: 0 8px; }
+    .menu li.disabled { cursor: no-drop; color: #bbb; }
+    .card, .check { cursor: pointer; }
+  </style>
+</head>
+<body>
+  <!-- 来自一次真跑：jQuery 时代的下拉菜单，<li> 没有 role、没有 href，点击靠事件委托。
+       语义选择器认不出它们，模型只能去点名字相近的别的链接。 -->
+  <button type="button" id="toggle">批量导入产品库</button>
+  <ul class="menu" id="menu">
+    <li data-to="ebay"><span class="title">导入eBay产品库</span><i class="hot"></i></li>
+    <li data-to="amazon"><span class="title">导入亚马逊产品库</span></li>
+    <li class="disabled" data-to="shein"><span class="title">导入SHEIN产品库</span></li>
+  </ul>
+  <!-- 与语义候选重叠的 pointer 元素：包住复选框的 label、里面放着链接的卡片。它们不该再算一次。 -->
+  <label class="check"><input type="checkbox" /> 全选</label>
+  <div class="card"><a href="#detail">查看详情</a> 卡片正文</div>
+  <p id="result"></p>
+  <script>
+    document.getElementById("menu").addEventListener("click", (event) => {
+      const item = event.target.closest("li");
+      if (item && !item.classList.contains("disabled")) {
+        document.getElementById("result").textContent = `已导入：${item.dataset.to}`;
+      }
+    });
+  </script>
+</body>
+</html>

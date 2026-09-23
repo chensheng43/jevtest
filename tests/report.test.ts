@@ -104,6 +104,7 @@ function sampleReport(over: Partial<CaseRunReport> = {}): CaseRunReport {
       passed: false,
       failureReason: null,
       finalUrl: "https://example.test/wiki",
+      finalFrame: null,
       steps: [stepWith(), stepWith({ step: 2, action: "输入「Gödel」", kind: "fill", text: "Gödel", textEngine: "typesafe" })],
       guardrailHits: [],
       assertion: {
@@ -207,6 +208,7 @@ test("buildReport：时间戳不可解析时退到计量器读数，绝不写 Na
     passed: null,
     failureReason: "引擎不可达",
     finalUrl: null,
+    finalFrame: null,
     steps: [],
     guardrailHits: [],
     assertion: null,

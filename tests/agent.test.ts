@@ -62,6 +62,7 @@ async function runCase(input: {
   session: FakeSession;
   engine: DecisionEngine;
   signal?: AbortSignal;
+  captureFrame?: () => Promise<number>;
 }): Promise<RunResult> {
   const events: RunEvent[] = [];
   const budget = createBudgetMeter(input.caseDef.budget);
@@ -75,6 +76,7 @@ async function runCase(input: {
       },
     },
     caseDef: input.caseDef,
+    ...(input.captureFrame === undefined ? {} : { captureFrame: input.captureFrame }),
   });
 
   const report = await agent.run(input.signal ?? new AbortController().signal);
@@ -771,4 +773,85 @@ test("BLOCKED 没过半不结束运行：改走次高的 CLICK 并留痕；替�
   assert.equal(warnings.length, MAX_WEAK_BLOCKED_OVERRIDES, "每次替换都在事件里说明了原因");
   const decided = eventsOf(events, "step.decided").map((event) => (event.type === "step.decided" ? event.operation : ""));
   assert.deepEqual(decided, ["CLICK", "CLICK", "CLICK", "BLOCKED"], "step.decided 报的是实际走的操作");
+});
+
+// ---------------------------------------------------------------------------
+// 截图
+// ---------------------------------------------------------------------------
+
+/** 一个只数数的截图器：返回 0、1、2…，并记下被调了几次。 */
+function countingFrames(): { capture: () => Promise<number>; calls: () => number } {
+  let next = 0;
+  return {
+    capture: () => Promise.resolve(next++),
+    calls: () => next,
+  };
+}
+
+test("截图：每次观测一帧，StepRecord.frame 是操作前画面，finalFrame 是结束时那一页", async () => {
+  const pageA = richPage({ fingerprint: "fp-a", url: "https://example.test/a" });
+  const pageB = richPage({ fingerprint: "fp-b", url: "https://example.test/b" });
+  const session = new FakeSession({ observations: [pageA, pageB] });
+  const engine = createScriptedEngine({ steps: [clickLink(), done()] });
+  const frames = countingFrames();
+
+  const { report, events } = await runCase({ caseDef: makeCase(), session, engine, captureFrame: frames.capture });
+
+  assert.equal(report.status, "done");
+  assert.equal(stepAt(report, 0).frame, 0, "第 0 步是在起始页（第 0 帧）上决策的");
+  assert.equal(report.finalFrame, 1, "DONE 没有 StepRecord，它看到的那一页只能记在 finalFrame");
+  assert.equal(frames.calls(), 2, "同一次观测只截一次：结束时页面没再变，不补帧");
+  const observed = eventsOf(events, "step.observed").map((event) => (event.type === "step.observed" ? event.frame : -1));
+  assert.deepEqual(observed, [0, 1], "step.observed 带上本次观测的帧号，界面实时显示用它");
+});
+
+test("截图：循环在动作之后直接结束（无进展）时补一帧，finalFrame 不指向旧页面", async () => {
+  // 两个不同的对象、同一个指纹：真会话每次观测都产出新对象，而页面没变
+  const session = new FakeSession({
+    observations: [richPage({ fingerprint: "fp-same" }), richPage({ fingerprint: "fp-same" })],
+  });
+  const engine = createScriptedEngine({ steps: [clickLink(), clickLink(), clickLink(), clickLink()] });
+  const frames = countingFrames();
+
+  const { report } = await runCase({
+    caseDef: makeCase({ assertions: { trajectory: { maxIdenticalConsecutive: 1 } } }),
+    session,
+    engine,
+    captureFrame: frames.capture,
+  });
+
+  assert.equal(report.status, "blocked");
+  assert.equal(report.steps.length, 1);
+  assert.equal(stepAt(report, 0).frame, 0);
+  assert.equal(report.finalFrame, 1, "动作之后的那次观测也要有画面");
+});
+
+test("截图失败不影响运行：帧记 null，只警告一次", async () => {
+  const pageA = richPage({ fingerprint: "fp-a" });
+  const pageB = richPage({ fingerprint: "fp-b" });
+  const session = new FakeSession({ observations: [pageA, pageB] });
+  const engine = createScriptedEngine({ steps: [clickLink(), done()] });
+
+  const { report, events } = await runCase({
+    caseDef: makeCase(),
+    session,
+    engine,
+    captureFrame: () => Promise.reject(new Error("磁盘满了")),
+  });
+
+  assert.equal(report.status, "done", "截图是物证，不是运行的一部分");
+  assert.equal(stepAt(report, 0).frame, null);
+  assert.equal(report.finalFrame, null);
+  const warnings = eventsOf(events, "run.log").filter((event) => event.type === "run.log" && event.message.includes("截图失败"));
+  assert.equal(warnings.length, 1, "同一个原因每步重复一遍只是噪音");
+});
+
+test("不开截图时：帧全为 null", async () => {
+  const session = new FakeSession({ observations: [richPage({ fingerprint: "fp-a" }), richPage({ fingerprint: "fp-b" })] });
+  const engine = createScriptedEngine({ steps: [clickLink(), done()] });
+
+  const { report } = await runCase({ caseDef: makeCase(), session, engine });
+
+  assert.equal(stepAt(report, 0).frame, null);
+  assert.equal(report.finalFrame, null);
 });

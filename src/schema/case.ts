@@ -22,6 +22,11 @@ import { slugify } from "./yaml.ts";
 import { actionKindSchema, runStatusSchema } from "./events.ts";
 import type { ActionKind, Operation, RunStatus } from "./events.ts";
 
+// zod 内置的校验文案改成中文。它是进程级的全局配置，放在这里是因为用例 schema 是
+// 一切校验的入口（Web 的保存/导入、CLI 的 validate/import 都经过它）；
+// 以前界面上直接出现「Too small: expected string to have >=1 characters」。
+z.config(z.locales.zhCN());
+
 // ---------------------------------------------------------------------------
 // 断言：最终页面
 // ---------------------------------------------------------------------------

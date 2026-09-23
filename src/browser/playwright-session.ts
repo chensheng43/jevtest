@@ -209,7 +209,7 @@ type RawPageKey = readonly [number, string, number, number, number, number, unkn
  */
 interface PageGlobals {
   document: {
-    body: unknown;
+    body: PageElement | null;
     querySelectorAll(selector: string): PageElement[];
     elementFromPoint(x: number, y: number): PageElement | null;
   };
@@ -219,7 +219,7 @@ interface PageGlobals {
   innerHeight: number;
   requestAnimationFrame(cb: () => void): unknown;
   setTimeout(cb: () => void, ms: number): unknown;
-  getComputedStyle(el: PageElement): { overflowX: string; overflowY: string };
+  getComputedStyle(el: PageElement): { overflowX: string; overflowY: string; cursor: string };
 }
 
 interface PageElement {
@@ -229,6 +229,7 @@ interface PageElement {
   value: string;
   disabled?: boolean;
   shadowRoot: unknown;
+  parentElement: PageElement | null;
   options?: { length: number; [index: number]: PageOption | undefined };
   scrollHeight: number;
   scrollWidth: number;
@@ -239,6 +240,7 @@ interface PageElement {
   dispatchEvent(event: unknown): boolean;
   matches(selector: string): boolean;
   closest(selector: string): PageElement | null;
+  querySelectorAll(selector: string): PageElement[];
   contains(other: unknown): boolean;
   checkVisibility(options?: { checkOpacity?: boolean; checkVisibilityCSS?: boolean }): boolean;
   getBoundingClientRect(): { x: number; y: number; width: number; height: number };
@@ -495,12 +497,29 @@ function probeFrameInPage(arg: { thresholdPx: number }): FrameStats {
     'a[href],button,input,textarea,select,summary,[contenteditable="true"],' +
     roles.map((role) => `[role="${role}"]`).join(",");
   let interactiveElements = 0;
+  const taken = new Set<PageElement>();
   for (const el of doc.querySelectorAll(selector)) {
     const type = el.type ?? "";
     if (type === "password" || type === "file" || type === "hidden") continue;
     if (!visible(el)) continue;
     if (el.matches(":disabled") || el.closest('[aria-disabled="true"]')) continue;
+    taken.add(el);
     interactiveElements++;
+  }
+  // 与 snapshot.js 的 cursor:pointer 候选同一条标准（最外层、不与语义候选重叠），同样不看视口
+  const covering = new Set<PageElement>();
+  for (const el of taken) {
+    for (let p = el.parentElement; p && !covering.has(p); p = p.parentElement) covering.add(p);
+  }
+  const pointer = (el: PageElement | null): boolean => el !== null && g.getComputedStyle(el).cursor === "pointer";
+  for (const el of doc.body?.querySelectorAll("*") ?? []) {
+    if (taken.has(el) || covering.has(el)) continue;
+    if (!pointer(el) || pointer(el.parentElement)) continue;
+    let inside = false;
+    for (let p = el.parentElement; p && !inside; p = p.parentElement) inside = taken.has(p);
+    if (inside || !visible(el) || el.closest('[aria-disabled="true"]')) continue;
+    const r = el.getBoundingClientRect();
+    if (r.width > 0 && r.height > 0) interactiveElements++;
   }
 
   return {

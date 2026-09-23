@@ -18,7 +18,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 
 import { composeRunSignal, createRunnerService, DEFAULT_STOP_TIMEOUT_MS, failureReport } from "../src/core/runner.ts";
 import type { QueueStatus, RunnerService } from "../src/core/runner.ts";
@@ -52,6 +52,7 @@ function testSettings(overrides: Partial<Settings> = {}): Settings {
     headless: true,
     // 默认关掉 tracing：开了会去建 runs/<runId>/ 目录，而绝大多数测试不关心产物
     tracing: false,
+    recordFrames: false,
     casesDir: "./cases",
     runsDir: "./runs",
     authDir: "./auth",
@@ -156,6 +157,7 @@ interface Harness {
 function makeHarness(input: {
   workers?: number;
   tracing?: boolean;
+  recordFrames?: boolean;
   runsDir?: string;
   steps?: ScriptedStep[] | ((caseDef: Case) => ScriptedStep[]);
   /** 每次借 context 时造一个 session。不给就造一个「两页、可点可填」的默认页 */
@@ -170,6 +172,7 @@ function makeHarness(input: {
   const settings = testSettings({
     ...(input.workers === undefined ? {} : { workers: input.workers }),
     ...(input.tracing === undefined ? {} : { tracing: input.tracing }),
+    ...(input.recordFrames === undefined ? {} : { recordFrames: input.recordFrames }),
     ...(input.runsDir === undefined ? {} : { runsDir: input.runsDir }),
   });
   const events: RunEvent[] = [];
@@ -312,7 +315,8 @@ test("一次运行的数据流：queued -> started -> observed/decided/executed 
   assert.equal(harness.reports.length, 1, "persist 只被调用一次");
   assert.equal(report.artifacts.frozenCase, "case.yaml", "冻结用例的相对路径约定由 runner 保证");
   assert.equal(report.artifacts.traceZip, null, "未开 tracing 就没有 trace");
-  assert.equal(report.artifacts.framesDir, null, "截图通路未接，指向一个空目录等于让报告说谎");
+  assert.equal(report.artifacts.framesDir, null, "runner 不凭开关自称有帧：是否真有帧由 persist 实地看目录");
+  assert.equal(report.finalFrame, null, "没开截图就没有帧");
   assert.equal(report.caseRevision, 0, "revision/digest 由 persist 用 store.freeze() 定稿，runner 不编造");
   assert.equal(report.caseDigest, "");
 
@@ -759,6 +763,44 @@ test("tracing 开启时：trace 落在运行目录下，artifacts.traceZip 指�
       "trace 必须写在 runs/<runId>/ 下：报告是自包含的，产物也要在同一个目录里",
     );
     harness.runner.cancelAll();
+    await harness.runner.stop();
+  } finally {
+    await rm(runsDir, { recursive: true, force: true });
+  }
+});
+
+test("截图开启时：每次观测一帧落在 runs/<runId>/frames/<n>.jpg，报告里的帧号指向它们", async () => {
+  const runsDir = await mkdtemp(join(tmpdir(), "jevtest-runner-"));
+  try {
+    const harness = makeHarness({ recordFrames: true, runsDir });
+    harness.runner.start();
+    const report = (await runAll(harness, [makeCase()]))[0];
+    assert.ok(report !== undefined);
+
+    assert.equal(report.status, "done");
+    assert.equal(report.steps[0]?.frame, 0);
+    assert.equal(report.finalFrame, 1);
+    const framesDir = join(runsDir, report.runId, "frames");
+    assert.deepEqual((await readdir(framesDir)).sort(), ["0.jpg", "1.jpg"]);
+    assert.deepEqual([...(await readFile(join(framesDir, "0.jpg")))], [0xff, 0xd8, 0xff, 0xd9]);
+    harness.runner.cancelAll();
+    await harness.runner.stop();
+  } finally {
+    await rm(runsDir, { recursive: true, force: true });
+  }
+});
+
+test("截图：RunOptions.recordFrames 覆盖全局设置", async () => {
+  const runsDir = await mkdtemp(join(tmpdir(), "jevtest-runner-"));
+  try {
+    const harness = makeHarness({ recordFrames: true, runsDir });
+    harness.runner.start();
+    const { runId } = harness.runner.enqueue(makeCase(), { recordFrames: false });
+    await waitFor(() => harness.reports.some((candidate) => candidate.runId === runId), "报告落盘");
+    const report = harness.reports.find((candidate) => candidate.runId === runId);
+    assert.ok(report !== undefined);
+    assert.equal(report.steps[0]?.frame, null);
+    await assert.rejects(readdir(join(runsDir, runId, "frames")), "关掉截图就不建 frames 目录");
     await harness.runner.stop();
   } finally {
     await rm(runsDir, { recursive: true, force: true });

@@ -55,8 +55,10 @@
  *   用例构造引擎，知道实际用的是哪个）；`run.finished` 也只能由 runner 发——只有它
  *   知道最终报告有没有被异常改写成 `error`，agent 是无法知道的。
  *
- * - **`frame` 恒为 null。** 截图开关（`RunOptions.recordFrames`）在 runner 手里，
- *   `AgentDeps` 里没有它，落盘路径也不在这里。要开截图得先把这条通路补上，见报告「遗留项」。
+ * - **截图只在观测之后取一帧，且只经 `captureFrame`。** 开关与落盘路径都在 runner 手里，
+ *   agent 只拿到一个「取一帧、返回序号」的函数。帧是**操作前画面**：`StepRecord.frame`
+ *   指向做这一步决策时看到的那一页；终止决策（DONE / BLOCKED、越界、预算）不产生 StepRecord，
+ *   它看到的最后一页记在报告的 `finalFrame`。截图失败只记一条 warn，不影响运行。
  */
 
 import type { Case, CaseRevision } from "../schema/case.ts";
@@ -130,6 +132,11 @@ export interface AgentDeps {
   caseRevision?: CaseRevision;
   /** 属于哪次批量运行；单跑为 null */
   suiteRunId?: string | null;
+  /**
+   * 取一帧当前页面的截图并落盘，返回帧序号。不给 = 不截图（报告里 frame 全为 null）。
+   * 由 runner 按 `recordFrames` 构造——落盘路径是 runner 的事，agent 只要序号。
+   */
+  captureFrame?: () => Promise<number>;
 }
 
 /** 一步的结局，`pushRecord` 用它填写 `StepRecord` 里执行侧的那几个字段。 */
@@ -175,6 +182,12 @@ export class CaseAgent {
   private step = 0;
   /** 最近一次成功观测到的页面。断言层的 `final` 就是它 */
   private page: Observation | null = null;
+  /** `framedPage` 那次观测对应的截图序号；没开截图或截图失败为 null */
+  private pageFrame: number | null = null;
+  /** `pageFrame` 拍的是哪一次观测。与 `page` 不同时说明最新的页面还没截过图 */
+  private framedPage: Observation | null = null;
+  /** 截图失败只警告一次：通常是同一个原因（磁盘、页面崩溃），每步重复一遍只是噪音 */
+  private frameWarned = false;
   /** 已经把几次「没过半的 BLOCKED」改走了别的操作（上限 MAX_WEAK_BLOCKED_OVERRIDES） */
   private weakBlockedOverrides = 0;
   /** 自上一次成功执行以来，连续丢弃了几次决策（上限 MAX_CONSECUTIVE_DISCARDS） */
@@ -236,6 +249,7 @@ export class CaseAgent {
         this.page = await session.goto(caseDef.startUrl, { waitUntil: "domcontentloaded" });
       }
       const page = this.page;
+      await this.framePage(page);
       events.emit({
         type: "step.observed",
         runId: this.runId,
@@ -243,8 +257,7 @@ export class CaseAgent {
         url: page.url,
         elementCount: page.actions.length,
         omittedActions: page.omittedActions,
-        // 截图通路未接（见文件头「实现注记」），如实报 null 而不是编一个序号
-        frame: null,
+        frame: this.pageFrame,
         elapsedMs: budget.stats().elapsedMs,
       });
 
@@ -537,6 +550,9 @@ export class CaseAgent {
       this.step += 1;
     }
 
+    // 动作之后的那次观测只在下一轮开头才截图；循环在那之前就结束时（无进展、取消）
+    // 补一帧，`finalFrame` 才真是断言看到的那一页。
+    if (this.page !== null) await this.framePage(this.page);
     return this.finish(failureReason);
   }
 
@@ -617,6 +633,7 @@ export class CaseAgent {
       passed: assertion?.passed ?? null,
       failureReason,
       finalUrl: this.resolveFinalUrl(),
+      finalFrame: this.pageFrame,
       steps: this.history,
       guardrailHits: this.guardrailHits,
       assertion,
@@ -631,6 +648,32 @@ export class CaseAgent {
    * 为什么不用「最后观测到的页面」当主源：`urlAfter` 是**动作之后**的地址，
    * 才是这次运行真正的落点；而观测失败时它是 null，此时才退到 currentUrl()。
    */
+  /**
+   * 给一次观测截图，结果记进 `pageFrame`。同一次观测只截一次。
+   *
+   * 截图是物证而不是运行的一部分：失败时帧记 null、发一条 warn，然后照常往下走——
+   * 为了一张图把一次本来能判定的运行判成 error，是本末倒置。
+   */
+  private async framePage(page: Observation): Promise<void> {
+    if (page === this.framedPage) return;
+    this.framedPage = page;
+    this.pageFrame = null;
+    const capture = this.deps.captureFrame;
+    if (capture === undefined) return;
+    try {
+      this.pageFrame = await capture();
+    } catch (error) {
+      if (this.frameWarned) return;
+      this.frameWarned = true;
+      this.deps.events.emit({
+        type: "run.log",
+        runId: this.runId,
+        level: "warn",
+        message: `截图失败，这一帧留空（运行照常继续，之后的截图失败不再重复提示）：${error instanceof Error ? error.message : String(error)}`,
+      });
+    }
+  }
+
   private resolveFinalUrl(): string | null {
     const last = this.history[this.history.length - 1];
     if (last !== undefined && last.urlAfter !== null) return last.urlAfter;
@@ -822,7 +865,7 @@ export class CaseAgent {
       engineLatencyMs: decision.latencyMs,
       textLatencyMs: outcome.textLatencyMs,
       observedMs: this.deps.budget.stats().elapsedMs,
-      frame: null,
+      frame: this.pageFrame,
       engineUsage: decision.usage,
     };
     this.history.push(record);

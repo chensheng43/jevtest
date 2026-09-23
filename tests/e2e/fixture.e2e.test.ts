@@ -88,6 +88,7 @@ function makeSettings(overrides: Partial<Settings>): Settings {
     // 无头：CI 与本地都不该弹出窗口。要看过程时把它设成 false 再单独跑这个文件。
     headless: true,
     tracing: true,
+    recordFrames: true,
     casesDir: "./cases",
     runsDir: "./runs",
     authDir: "./auth",
@@ -358,6 +359,31 @@ e2e("打开起始页：等接口回来再做第一次观测，而不是只看到
     const labels = page.actions.map((action) => action.label);
     assert.ok(labels.includes("批量导入产品库"), `第一次观测就应当看到晚到的按钮，实际：${labels.join(" / ")}`);
     assert.ok(labels.includes("导入设置"));
+  });
+});
+
+e2e("观测：没有 role、只靠 cursor:pointer 可点的菜单项也进候选集，且能被点中", async () => {
+  // 这条来自一次真跑：「批量导入产品库」的下拉已经展开，但菜单项是无语义的 <li>，
+  // 元素表里没有它们；模型读得到「导入eBay产品库」却无 id 可点，转而点了侧边栏的「eBay 导入」。
+  await wiring.pool.withSession({ tracing: false }, async (session) => {
+    const page = await session.goto(`${fixture.url}/pointer.html`, { waitUntil: "domcontentloaded" });
+    const labels = page.actions.map((action) => action.label);
+    const item = page.actions.find((action) => action.label === "导入eBay产品库");
+    assert.ok(item !== undefined, `菜单项应当进候选集：${labels.join(" | ")}`);
+    assert.equal(item.role, "button", "无语义可点元素按 button 记，只读模式才会保守地剔除它");
+    assert.ok(labels.includes("导入亚马逊产品库"));
+    // cursor: no-drop 的禁用项不是 pointer，不进
+    assert.equal(labels.includes("导入SHEIN产品库"), false, labels.join(" | "));
+    // 每个菜单项只算一次：<span class="title"> 继承了 pointer，但它不是最外层
+    assert.equal(labels.filter((label) => label === "导入eBay产品库").length, 1, labels.join(" | "));
+    // 与语义候选重叠的 pointer 元素不重复收：label 包着复选框、卡片里有链接
+    assert.equal(labels.filter((label) => label === "全选").length, 1, labels.join(" | "));
+    assert.equal(labels.some((label) => label.includes("卡片正文")), false, labels.join(" | "));
+
+    // 点下去必须真的触发委托在 <ul> 上的处理器：页面把结果写进可见文本
+    await session.act(item, page);
+    const after = await session.observe();
+    assert.match(after.text, /已导入：ebay/);
   });
 });
 

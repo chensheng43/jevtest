@@ -89,6 +89,7 @@ export class FakeSession implements Session {
   observeCalls = 0;
   probeCalls = 0;
   closeCalls = 0;
+  frameCalls = 0;
 
   readonly #steps: ObservationStep[];
   readonly #options: FakeSessionOptions;
@@ -159,9 +160,9 @@ export class FakeSession implements Session {
   }
 
   frameJpeg(): Promise<Buffer> {
-    // agent 从不调它（截图通路未接，见 agent.ts 的注记）。真被调到就返回空帧，
-    // 让调用方自己发现「这里没有画面」，而不是静默给了张假的。
-    return Promise.resolve(Buffer.alloc(0));
+    this.frameCalls += 1;
+    // 只有 JPEG 的 SOI/EOI 标记，够让落盘与文件服务的测试验到「写的就是这几个字节」
+    return Promise.resolve(Buffer.from([0xff, 0xd8, 0xff, 0xd9]));
   }
 
   close(): Promise<void> {

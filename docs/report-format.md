@@ -26,7 +26,7 @@ runs/
   <runId>/
     run.json           完整报告（CaseRunReport）
     case.yaml          产生本次运行的用例冻结快照
-    frames/<n>.jpg     按需截图，序号对应 StepRecord.frame（默认关闭）
+    frames/<n>.jpg     每次观测一帧截图，序号对应 StepRecord.frame / finalFrame（默认开启）
     trace.zip          Playwright trace，npx playwright show-trace 可直接打开
 ```
 
@@ -39,8 +39,12 @@ runs/
 2. **落盘必须原子。** 先写临时文件再 `rename`。否则进程被中断会留下半截 `run.json`，
    列表页一读就崩——而崩溃发生在下一次打开界面时，跟真正的故障点已经隔了很远。
 
-3. **`frames/` 默认关闭。** 开启会让运行目录膨胀并拖慢每一步。事件里只带 `frame` 序号，
-   画面由前端另外请求，见 [`architecture.md §8.4`](architecture.md)。
+3. **`frames/` 默认开启**（`JEVTEST_RECORD_FRAMES`，`RunOptions.recordFrames` 可逐次覆盖）。
+   每次观测之后截一帧，序号从 0 单调递增、与步号无关——一步可能因陈旧决策被重新观测、截多帧。
+   帧是**操作前画面**：`StepRecord.frame` 是做这一步决策时看到的那一页；终止决策不产生
+   StepRecord，结束时那一页记在 `finalFrame`。截图失败只记一条 `run.log` warn、帧记 `null`，
+   不影响运行。代价是每步多几十毫秒（计入墙钟预算）和每帧约 100~150 KB 磁盘。
+   事件里只带 `frame` 序号，画面由前端另外请求，见 [`architecture.md §8.4`](architecture.md)。
 
 `index.jsonl` 的追加**由 runner 统一做**，不让各 worker 各写各的——并发追加会交错出坏行。
 读的时候坏行跳过，而不是让整个列表打不开（`core/report.ts` 的 `readIndex`）。
@@ -82,7 +86,7 @@ runs/
 | 执行 | `executed` / `blockReason` | `executed: false` = **浏览器没收到任何输入**，被护栏拦下了 |
 | 输入 | `text` / `textEngine` | TYPE_TEXT 实际输入的文本；`textEngine` 为生成它的引擎名 |
 | 时序 | `urlBefore` / `urlAfter` / `pageChanged` / `observedMs` / `engineLatencyMs` / `textLatencyMs` | `pageChanged` 为 `null` = 执行后观测失败（例如导航打断），**不代表动作没发生** |
-| 画面 | `frame` | 对应 `frames/<n>.jpg`；未开启截图为 `null` |
+| 画面 | `frame` | **操作前画面**，对应 `frames/<n>.jpg`；未开启截图或截图失败为 `null` |
 | 成本 | `engineUsage` | 该步的 token / 金额 / 重试请求数 |
 
 > `pageChanged` 的三态（`true` / `false` / `null`）值得单独说：`null` 不是「没变化」，

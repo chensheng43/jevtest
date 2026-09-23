@@ -169,6 +169,11 @@ export interface CaseRunReport {
   goal: string;
   startUrl: string;
   finalUrl: string | null;
+  /**
+   * 运行结束时那一页的截图序号（`frames/<n>.jpg`）。终止决策不产生 StepRecord，
+   * 这是看到「最后停在哪一页」的唯一一帧。没截图为 null；早于这个字段的报告里没有它。
+   */
+  finalFrame?: number | null;
 
   steps: StepRecord[];
   guardrailHits: { step: number; reason: string; action: string }[];
@@ -337,6 +342,7 @@ export const reportSchema: ZodType<CaseRunReport, CaseRunReport> = z.object({
   goal: z.string(),
   startUrl: z.string(),
   finalUrl: z.string().nullable(),
+  finalFrame: z.number().int().nonnegative().nullable().optional(),
 
   steps: z.array(stepRecordSchema),
   guardrailHits: z.array(

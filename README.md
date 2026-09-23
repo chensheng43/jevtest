@@ -156,12 +156,11 @@ src/
 | --- | --- | --- |
 | 1 | 更多真用例 | 目前只有种子用例用真 TypeSafe + 真站点跑通过（基线见 [`architecture.md §11.3`](docs/architecture.md)）。含下拉、复选框、更严断言的用例都还没真跑过 |
 | 2 | 人工使用 `jevtest serve` | 界面已由 `npm run walkthrough`（真 Chromium）脚本化走查，但滚动、窄屏、实时进度这类手感仍未经人验 |
-| 3 | 截图通路（`recordFrames`） | `StepRecord.frame` 与 `framesDir` 恒为 null。缺的是 runner → agent 的接线，`Session.frameJpeg()` 是现成的 |
-| 4 | `toJUnit` | `core/report.ts` 里是 stub，`export?format=junit` 回 501。CI 集成前必须有 |
-| 5 | 报告标注「停用过内置护栏」 | `allowDefaultOverride: true` 的运行在报告里看不出来，见 [`limitations.md` §9](docs/limitations.md) |
-| 6 | 通用 LLM 引擎（`openai-compat.ts`） | 让 `probabilities: "degenerate"` 这条设计有第二个真实用户。需要先解决引擎凭证从哪来（`EngineContext` 目前只有一对 apiKey/model） |
-| 7 | TypeSafe 的金额映射 | 实测响应里没有金额字段，成本类断言在真引擎下是 skipped |
-| 8 | shadow DOM 递归 / 跨 iframe | 见 [`limitations.md`](docs/limitations.md)，准入会警告 |
+| 3 | `toJUnit` | `core/report.ts` 里是 stub，`export?format=junit` 回 501。CI 集成前必须有 |
+| 4 | 报告标注「停用过内置护栏」 | `allowDefaultOverride: true` 的运行在报告里看不出来，见 [`limitations.md` §9](docs/limitations.md) |
+| 5 | 通用 LLM 引擎（`openai-compat.ts`） | 让 `probabilities: "degenerate"` 这条设计有第二个真实用户。需要先解决引擎凭证从哪来（`EngineContext` 目前只有一对 apiKey/model） |
+| 6 | TypeSafe 的金额映射 | 实测响应里没有金额字段，成本类断言在真引擎下是 skipped |
+| 7 | shadow DOM 递归 / 跨 iframe | 见 [`limitations.md`](docs/limitations.md)，准入会警告 |
 
 ## 许可
 

@@ -75,7 +75,7 @@ import type { Settings } from "../config.ts";
 import type { BudgetMeter } from "./budget.ts";
 
 import { randomBytes } from "node:crypto";
-import { mkdir } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { AsyncQueue } from "../util/async.ts";
@@ -84,7 +84,7 @@ import { budgetOf, createBudgetMeter } from "./budget.ts";
 import { CaseAgent } from "./agent.ts";
 
 export interface RunOptions {
-  /** 是否保存截图帧。默认关闭——开启会让运行目录膨胀而且拖慢每一步 */
+  /** 是否保存截图帧。不给则取 `settings.recordFrames`（默认开启） */
   recordFrames?: boolean;
   /** 覆盖用例声明的引擎，用于同一用例的 A/B 对比 */
   engineOverride?: string;
@@ -166,6 +166,9 @@ export const FROZEN_CASE_ARTIFACT = "case.yaml";
 
 /** trace 在运行目录里的相对路径。由池按 `tracePath` 写入 */
 export const TRACE_ARTIFACT = "trace.zip";
+
+/** 截图帧在运行目录里的子目录，帧文件名为 `<序号>.jpg`。与 `core/report.ts` 的 `FRAMES_DIR` 一致 */
+export const FRAMES_ARTIFACT = "frames";
 
 /**
  * `stop()` 的默认超时。
@@ -348,8 +351,8 @@ export function createRunnerService(deps: RunnerDeps): RunnerService {
     report.artifacts = {
       ...report.artifacts,
       traceZip,
-      // 截图通路未接（agent 的 frame 恒为 null，见 agent.ts 的注记）。
-      // 这里不写 "frames"：目录里一个文件都不会有，指向它等于让报告说谎。
+      // 不在这里写 "frames"：开了截图也可能一帧都没截成。是否真有帧由 persist 实地看目录决定
+      // （`core/report.ts` 的 persistReport），而不是由开关推断。
       framesDir: null,
       frozenCase: FROZEN_CASE_ARTIFACT,
     };
@@ -389,6 +392,7 @@ export function createRunnerService(deps: RunnerDeps): RunnerService {
         ? caseDef
         : { ...caseDef, engine: active.options.engineOverride };
     const traceZip = deps.settings.tracing ? TRACE_ARTIFACT : null;
+    const recordFrames = active.options.recordFrames ?? deps.settings.recordFrames;
 
     try {
       if (active.controller.signal.aborted) {
@@ -438,6 +442,7 @@ export function createRunnerService(deps: RunnerDeps): RunnerService {
             events: stampedSink(deps.events, active.runId),
             caseDef: effectiveCase,
             suiteRunId: active.options.suiteRunId ?? null,
+            ...(recordFrames ? { captureFrame: frameRecorder(session, runDirOf(active.runId)) } : {}),
           });
           active.agent = agent;
           // 两级信号都要传：只传 runSignal 会让停机悄悄失效（见 composeRunSignal 的说明）。
@@ -711,6 +716,30 @@ export function failureReport(runId: string, caseDef: Case, error: unknown, part
   });
 }
 
+/**
+ * 截图落盘器：每调一次截当前页面一帧，写成 `<runDir>/frames/<n>.jpg`，返回 n。
+ *
+ * 序号从 0 单调递增、与步号无关（一步可能因陈旧决策被重新观测、截多帧）；
+ * 报告里 `StepRecord.frame` 与 `finalFrame` 记的就是这个序号。
+ * 序号在写盘之前就占用：写失败时这个号作废，不会让两帧争同一个文件名。
+ */
+function frameRecorder(session: { frameJpeg(): Promise<Buffer> }, runDir: string): () => Promise<number> {
+  const dir = join(runDir, FRAMES_ARTIFACT);
+  let next = 0;
+  let dirReady = false;
+  return async () => {
+    const jpeg = await session.frameJpeg();
+    const frame = next;
+    next += 1;
+    if (!dirReady) {
+      await mkdir(dir, { recursive: true });
+      dirReady = true;
+    }
+    await writeFile(join(dir, `${frame}.jpg`), jpeg);
+    return frame;
+  };
+}
+
 /** 轨迹里的一次护栏命中（与 `CaseRunReport.guardrailHits` 同一形状）。 */
 interface GuardrailHit {
   step: number;
@@ -758,6 +787,7 @@ function skeletonReport(input: {
     goal: input.caseDef.goal,
     startUrl: input.caseDef.startUrl,
     finalUrl: null,
+    finalFrame: null,
     steps: input.steps,
     guardrailHits: input.guardrailHits,
     assertion: null,

@@ -39,6 +39,8 @@ export interface Settings {
   headless: boolean;
   /** 是否录制 Playwright trace。见下方说明 */
   tracing: boolean;
+  /** 是否在每次观测后保存一帧截图。`RunOptions.recordFrames` 可逐次覆盖 */
+  recordFrames: boolean;
   casesDir: string;
   runsDir: string;
   /** 登录态文件（`<名字>.json`）所在目录。内含会话 cookie，必须不入库 */
@@ -233,6 +235,10 @@ const envSchema = z.object({
   // 代价是运行目录会变大，所以 `.gitignore` 已忽略 `runs/`。
   // 需要跑大批量、只关心通过与否时，用 `JEVTEST_TRACING=off` 关掉。
   JEVTEST_TRACING: booleanField("JEVTEST_TRACING", true),
+  // 截图同样**默认开启**，理由与 tracing 一样：结果页的轨迹要逐步看画面，
+  // 而 trace.zip 得下载后另开工具才能看。代价是每步多一次截图（约几十毫秒，计入墙钟预算）
+  // 和每帧约 100~150 KB 的磁盘。
+  JEVTEST_RECORD_FRAMES: booleanField("JEVTEST_RECORD_FRAMES", true),
   JEVTEST_CASES_DIR: stringField("JEVTEST_CASES_DIR", DEFAULT_CASES_DIR),
   JEVTEST_RUNS_DIR: stringField("JEVTEST_RUNS_DIR", DEFAULT_RUNS_DIR),
   JEVTEST_AUTH_DIR: stringField("JEVTEST_AUTH_DIR", DEFAULT_AUTH_DIR),
@@ -283,6 +289,7 @@ export function loadSettings(env?: NodeJS.ProcessEnv): Settings {
     maxEngineInflight: values.JEVTEST_ENGINE_INFLIGHT,
     headless: values.JEVTEST_HEADLESS,
     tracing: values.JEVTEST_TRACING,
+    recordFrames: values.JEVTEST_RECORD_FRAMES,
     casesDir: values.JEVTEST_CASES_DIR,
     runsDir: values.JEVTEST_RUNS_DIR,
     authDir: values.JEVTEST_AUTH_DIR,

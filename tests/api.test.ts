@@ -46,6 +46,7 @@ function testSettings(overrides: Partial<Settings>): Settings {
     maxEngineInflight: 4,
     headless: true,
     tracing: false,
+    recordFrames: false,
     casesDir: "./cases",
     runsDir: "./runs",
     authDir: "./auth",

@@ -187,6 +187,7 @@ const PROBE_SETTINGS: Settings = {
   maxEngineInflight: 4,
   headless: true,
   tracing: false,
+  recordFrames: false,
   casesDir: "",
   runsDir: "",
   authDir: "",

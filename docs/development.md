@@ -51,6 +51,7 @@ cp .env.example .env                 # 填 TYPESAFE_API_KEY
 | `JEVTEST_ENGINE_INFLIGHT` | `4` | 在途引擎请求上限。**与 `WORKERS` 刻意解耦** |
 | `JEVTEST_HEADLESS` | `true` | 要肉眼看 agent 操作时设 `false` |
 | `JEVTEST_TRACING` | `true` | 关掉可省磁盘，但失败时就没 trace 可看了 |
+| `JEVTEST_RECORD_FRAMES` | `true` | 每次观测截一帧，结果页的轨迹靠它看画面 |
 | `JEVTEST_CASES_DIR` / `JEVTEST_RUNS_DIR` | `./cases` / `./runs` | 用例库与运行产物 |
 | `JEVTEST_AUTH_DIR` | `./auth` | 登录态文件（会话 cookie，0600，不入库） |
 | `JEVTEST_DEFAULT_ENGINE` | `typesafe` | 用例未声明 `engine` 时用它。`scripted` 不在注册表里（测试专用，见下） |
@@ -239,11 +240,14 @@ const next = await session.observe();     // 后
 | 移植来的代码标注来源 | 文件头写明来源与 MIT 署名，详见 [`NOTICE`](../NOTICE) |
 | 不引入前端构建工具链 | 原生 HTML/CSS/JS。`tsc` 是编译器，不算打包器。前端库走 `/vendor/` 从 `node_modules` 直引，仍然不打包 |
 | 后端依赖控制在 3 个 | 加依赖前先问"手写要多少行"。浏览器侧依赖（`bootstrap`）不算在内，它不进 Node 进程 |
-| 前端只做展示，不做判断 | 三态怎么显示由 `style.css` 决定，但**哪一态**由 `app.js` 的 `passedBadge` / `verdictBadge` 唯一决定。D9/D8 的视觉区分由 `tests/frontend.test.ts` 守着 |
+| 前端的目录 | `app.js` 入口（路由）；`lib/` 不碰或只做底层 DOM（`api` / `core` 纯函数 / `format` / `runs` / `router` / `dom`）；`ui/` 反馈与通用组件；`components/` 登录态流程与轨迹查看器；`views/` 每个路由一张视图（D22） |
+| 前端只做展示，不做判断 | 三态怎么显示由 `style.css` 决定，但**哪一态**由 `ui/widgets.js` 的 `passedBadge` / `verdictBadge` / `checkBadge` 与 `lib/runs.js` 的 `verdictClass` 唯一决定。D9/D8 的视觉区分由 `tests/frontend.test.ts` 守着 |
+| 失败只走四条路 | 字段错误（编辑器）/ 页面错误槽 `errorSlot()` / `toast()` / 全局横幅，都在 `ui/feedback.js`。异步按钮一律 `busy(button, fn)`；确认一律 `confirmDialog()`，不用原生 `alert` / `confirm`（测试静态检查） |
 | 编辑器的草稿是唯一事实来源 | 控件在 `input` 时写回 `draft`，`formToDefinition(draft)` 是纯函数、不读 DOM。两处读值必然分叉，表现是「填了但保存后没有」（D19） |
 | 子节点列表用 `setChildren(node, [...])` | 直接 `replaceChildren` 传数组会被转成字符串（页面上出现 `[object HTMLDivElement]`），传 `null` 会渲染出字面的 "null"，两种都不报错。单个节点直接 `replaceChildren` 没问题 |
-| 标签页与折叠不引 Bootstrap 的 JS | 手写 `tabs()` / 原生 `<details>`。用 `bootstrap.js` 的前提是先按 D18 重估 `/vendor` 的信任边界 |
-| 前端的纯逻辑放在 `#region 纯函数` 之间 | 那两段不碰 DOM，`tests/frontend.test.ts` 会把它们抠出来跑往返测试——这是不引 jsdom 也能测到前端逻辑的唯一口子（D19） |
+| 标签页、折叠、菜单、对话框不引 Bootstrap 的 JS | 手写 `tabs()` / 原生 `<details>` / 原生 `<dialog>`。用 `bootstrap.js` 的前提是先按 D18 重估 `/vendor` 的信任边界 |
+| 前端的纯逻辑放在 `lib/core.js` | 它不碰 DOM，`tests/frontend.test.ts` 直接 import 它跑往返测试——这是不引 jsdom 也能测到前端逻辑的唯一口子（D19） |
+| 带记号的文案走 `rich()` / `hint()` | `**强调**` 与反引号只有经过它们才会渲染；直接塞进 `text:` 会在页面上显示字面的星号 |
 | 错误信息给人看 | 说清原因和怎么修，不要只抛 `Error: failed` |
 | 字符串联合类型代替 `enum` | `erasableSyntaxOnly` 要求 |
 

@@ -5,13 +5,15 @@
  * (https://github.com/browser-use/jev-ultrafast, MIT License, Copyright (c) 2026 Browser Use)
  * 详见 NOTICE。
  *
- * 相对原版只有三处改动：
+ * 相对原版只有四处改动：
  *   1. 全局缓存名 `window.__jevFast` -> `window.__jev`。
  *   2. 本文件头（原文无）。
  *   3. 候选集收集时加一次 `elementFromPoint` 命中测试（行内标了 `jevtest:`）。
  *      上游只在输入前测遮挡，于是被盖住的元素照样进候选集；模型选中它、输入前被拦下、
  *      重新观测后它还在、模型再选它——一次真跑在弹窗里一个被滚动区裁掉的复选框上
  *      这样空转了 16 次模型调用。
+ *   4. 语义候选之后追加一轮 `cursor:pointer` 候选（行内标了 `jevtest:`）：
+ *      没有 role 的 `<li>` / `<div>` 靠事件委托可点，上游看不见它们。
  * 其余逐字保留——包括变量命名风格，**这是刻意的**：
  * 上游若修复了可访问名解析或守卫语义，我们能直接 diff 而不必重新推导。
  *
@@ -125,6 +127,30 @@
       actions.push({...base,kind:editable?'fill':'click',value});
       if (editable) actions.push({...base,kind:'click',value,label:'Open '+base.label});
     }
+  }
+  // jevtest: 没有语义、只靠 cursor:pointer + 事件委托才可点的元素（jQuery/Bootstrap 时代的
+  // 下拉菜单 <li>、div 按钮）。上游的 selector 认不出它们：一次真跑里下拉菜单已经展开，
+  // 模型读得到「导入eBay产品库」却没有 id 可点，只好去点侧边栏里名字最像的「eBay 导入」链接。
+  // 只收最外层的 pointer 元素（子孙继承 cursor，不重复收），且与已有候选不重叠
+  // （包住候选的 <label>/卡片、候选内部的 <span> 都跳过）。追加在末尾，250 裁剪时先裁它们。
+  // role 记 button：它可能触发任何命令，只读模式按 button 剔除是保守的一侧。
+  const taken=new Set(actions.map(a=>cache.nodes.get(a.node))), covering=new Set();
+  for (const e of taken) for (let p=e.parentElement; p && !covering.has(p); p=p.parentElement) covering.add(p);
+  const pointer = e => !!e && getComputedStyle(e).cursor==='pointer';
+  for (const e of document.body.querySelectorAll('*')) {
+    if (taken.has(e) || covering.has(e)) continue;
+    const r=e.getBoundingClientRect(), x=r.x+r.width/2, y=r.y+r.height/2;
+    if (r.width<=0 || r.height<=0 || x<0 || y<0 || x>=innerWidth || y>=innerHeight) continue;
+    if (!pointer(e) || pointer(e.parentElement)) continue;
+    let inside=false;
+    for (let p=e.parentElement; p && !inside; p=p.parentElement) inside=taken.has(p);
+    if (inside || !visible(e) || e.closest('[aria-disabled="true"]')) continue;
+    const hit=document.elementFromPoint(x,y);
+    if (!hit || (hit!==e && !e.contains(hit))) continue;
+    const label=name(e).replace(/\s+/g,' ').trim().slice(0,120);
+    if (!label) continue;
+    actions.push({node:identity(e),role:'button',label,rect:{x:r.x,y:r.y,w:r.width,h:r.height},
+      kind:'click',value:''});
   }
   const words=[], walker=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT);
   const range=document.createRange(); let node,length=0;

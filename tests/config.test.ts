@@ -58,6 +58,7 @@ test("空环境下每一项都取文档里的默认值", () => {
     headless: true,
     // 默认开启：trace.zip 是排查失败最有用的东西，而失败不可预测
     tracing: true,
+    recordFrames: true,
     casesDir: "./cases",
     runsDir: "./runs",
     // 登录态文件含会话 cookie，目录已在 .gitignore 里
