@@ -16,8 +16,9 @@
  *      没有 role 的 `<li>` / `<div>` 靠事件委托可点，上游看不见它们。
  *   5. 额外返回 `notices`：当前可见的页面提示（toast / alert / 表单校验，行内标了 `jevtest:`）。
  *      不进 marker——它的文字本来就在 text 里，新鲜度与指纹不因它另起一套判据。
- *   6. 没有可访问名的 checkbox / radio / switch，label 补上所在表格行（表头 / 第几行 + 行文本，
- *      行内标了 `jevtest:`）。上游回退到角色名，表头全选框与每行的复选框同名，模型分不开。
+ *   6. 名字认不出是哪一个的候选（名字为空 / 只是 placeholder / 与同角色的候选重名），
+ *      label 补上它所在那一组的文字，在表格行里再带上第几行（行内标了 `jevtest:`）。
+ *      上游只用可访问名：每行的复选框都叫 `checkbox`、满屏输入框都叫「请输入」，模型分不开。
  *   7. 同源 iframe（行内标了 `jevtest:`）：本脚本在每个同源 frame 里各跑一次，
  *      子 frame 里的候选几何换算到**顶层视口**坐标，命中测试逐层做到顶层；额外返回 `frame`。
  *      主文档里这些都是恒等变换，行为与上游一致。拼装各 frame 的结果是 playwright-session.ts 的事。
@@ -80,6 +81,9 @@
     const px=x+ox, py=y+oy;
     return px>=0 && py>=0 && px<win.innerWidth && py<win.innerHeight && win.document.elementFromPoint(px,py)===f;
   });
+  // jevtest: SELECT / TEXTAREA 与 INPUT 一样不从内容取名（它们的内容是选项与取值，不是名字）。
+  // 上游只排除了 INPUT：一次真跑里分类选择器的 <select> 没有 label，名字退成了全部选项拼起来
+  // 的两千多字，每个选项的 SELECT 候选都带着它，决策请求被服务端以 max_tokens_exceeded 拒绝。
   const name = (e,seen=new Set()) => {
     if (!e || seen.has(e)) return '';
     seen.add(e);
@@ -88,7 +92,7 @@
     return referenced || e.getAttribute('aria-label') ||
       [...(e.labels||[])].map(l=>name(l,seen)).filter(Boolean).join(' ') ||
       (['button','submit','reset'].includes(e.type) ? e.value : '') || e.getAttribute('alt') ||
-      (e.tagName==='INPUT' ? '' : [...e.childNodes].map(n=>n.nodeType===3 ? n.textContent :
+      (['INPUT','SELECT','TEXTAREA'].includes(e.tagName) ? '' : [...e.childNodes].map(n=>n.nodeType===3 ? n.textContent :
         n.nodeType===1 && n.getAttribute('aria-hidden')!=='true' ? name(n,seen) : '').join(' ').trim()) ||
       e.getAttribute('title') || e.getAttribute('placeholder') || '';
   };
@@ -112,26 +116,52 @@
     }
     return null;
   };
-  // jevtest: 没有可访问名的勾选控件，标签里补上它所在的表格行。上游只回退到角色名，
-  // 于是表头全选框与每一行的复选框都叫 `checkbox`：一次真跑里目标写明「勾前 2 个、
-  // 不要点表头全选框」，模型分不出哪个是哪个，第一步就点了全选（一次选中 50 项）。
+  // jevtest: 候选自己的名字认不出是哪一个时，label 补上它所在的那一组。两种情况：
+  //   - 名字弱：空的（上游回退到角色名，每行的复选框都叫 `checkbox`）或只是 placeholder
+  //     （提示语不是标签，满屏都叫「请输入」）；
+  //   - 名字撞车：同一角色下不止一个候选叫这个名字（一列「编辑」、几组「是 / 否」）。
+  // 「那一组」是从候选往上、不含与它混淆的候选的最大祖先——名字弱时同角色的都算混淆，
+  // 撞车时同角色同名的才算。它的文字就是表单项标签、表格行、卡片标题；在表格行里再带上第几行。
+  // 真跑里的两次事故都是这一类：表头全选框与数据行的复选框同名，模型第一步点了全选；
+  // 「库存SKU:」没用 for= 关联，输入框只叫「请输入」，文本模型不知道填什么，回了 text: null。
   // 只改发给模型的 label；guard 仍用 name(e)，新鲜度判据不变。
   const clean = value => (value||'').replace(/\s+/g,' ').trim();
-  const rowContext = e => {
+  const rowPosition = e => {
     const row=e.closest('tr,[role="row"]');
     if (!row) return '';
-    const text=clean(row.innerText).slice(0,80);
-    const header=!!row.closest('thead') || (!!row.querySelector('th,[role="columnheader"]') &&
-      !row.querySelector('td,[role="cell"],[role="gridcell"]'));
-    if (header) return 'header row (usually select all)'+(text ? ' · '+text : '');
+    if (row.closest('thead') || (row.querySelector('th,[role="columnheader"]') &&
+      !row.querySelector('td,[role="cell"],[role="gridcell"]'))) return 'header row';
     let index=1;
     for (let p=row.previousElementSibling; p; p=p.previousElementSibling)
       if (p.matches('tr,[role="row"]') && !p.querySelector('th,[role="columnheader"]')) index++;
-    return 'row '+index+(text ? ' · '+text : '');
+    return 'row '+index;
   };
-  const choiceLabel = (e,rname) => {
-    const context=['checkbox','radio','switch'].includes(rname) ? rowContext(e) : '';
-    return context ? rname+' · '+context : rname;
+  const describe = picked => {
+    const within=new Map(), total=new Map(), labels=new Map();
+    const bump = (map,key) => map.set(key,(map.get(key)||0)+1);
+    const keyOf = ({e,rname,own}) => !own || own===e.getAttribute('placeholder') ? rname : rname+'\n'+own;
+    for (const {e,rname,own} of picked) {
+      bump(total,rname+'\n'+own);
+      for (let p=e.parentElement; p; p=p.parentElement) {
+        if (!within.has(p)) within.set(p,new Map());
+        bump(within.get(p),rname); bump(within.get(p),rname+'\n'+own);
+      }
+    }
+    for (const item of picked) {
+      const {e,rname,own}=item, key=keyOf(item);
+      if (key!==rname && total.get(key)===1) { labels.set(e,own); continue; }
+      // 文字超过 80 字多半已经爬出了这一组，停在上一层——除非上一层一个字都没有，那就截前 80 字
+      let text='';
+      // 下拉自己的选项不算组文字：名字空的 <select> 往上爬，第一层读到的就是它全部的选项
+      const inner=e.tagName==='SELECT' ? clean(e.innerText) : '';
+      for (let p=e.parentElement; p && p!==document.body && within.get(p).get(key)===1; p=p.parentElement) {
+        const value=clean(inner ? clean(p.innerText).replace(inner,' ') : p.innerText);
+        if (value.length>80) { text ||= value.slice(0,80); break; }
+        text=value;
+      }
+      labels.set(e,[own||rname,rowPosition(e),text!==own ? text : ''].filter(Boolean).join(' · '));
+    }
+    return labels;
   };
   cache.pageKey=()=>[performance.timeOrigin,location.href,scrollX,scrollY,innerWidth,innerHeight,
     [...document.querySelectorAll('input,textarea,select')].filter(safe)
@@ -144,7 +174,7 @@
       e.getAttribute('aria-expanded'),e.getAttribute('aria-checked'),e.getAttribute('aria-selected'),
       e.getAttribute('href'),scope?.innerText?.slice(0,6000)||''];
   };
-  const actions=[];
+  const picked=[];
   for (const e of document.querySelectorAll(selector)) {
     if (!safe(e) || !visible(e) || e.matches(':disabled') || e.closest('[aria-disabled="true"]')) continue;
     const r=e.getBoundingClientRect(), x=r.x+r.width/2, y=r.y+r.height/2, rname=role(e);
@@ -153,8 +183,36 @@
     const hit=document.elementFromPoint(x,y);
     if (!hit || (hit!==e && !e.contains(hit)) || !reachable(x,y)) continue;
     if (rname==='gridcell' && e.querySelector('button,[role="button"]')) continue;
-    const base={node:identity(e),role:rname,label:name(e)||choiceLabel(e,rname),
+    picked.push({e,r,rname,own:name(e)});
+  }
+  // jevtest: 没有语义、只靠 cursor:pointer + 事件委托才可点的元素（jQuery/Bootstrap 时代的
+  // 下拉菜单 <li>、div 按钮）。上游的 selector 认不出它们：一次真跑里下拉菜单已经展开，
+  // 模型读得到「导入eBay产品库」却没有 id 可点，只好去点侧边栏里名字最像的「eBay 导入」链接。
+  // 只收最外层的 pointer 元素（子孙继承 cursor，不重复收），且与已有候选不重叠
+  // （包住候选的 <label>/卡片、候选内部的 <span> 都跳过）。追加在末尾，250 裁剪时先裁它们。
+  // role 记 button：它可能触发任何命令，只读模式按 button 剔除是保守的一侧。
+  const taken=new Set(picked.map(item=>item.e)), covering=new Set();
+  for (const e of taken) for (let p=e.parentElement; p && !covering.has(p); p=p.parentElement) covering.add(p);
+  const pointer = e => !!e && getComputedStyle(e).cursor==='pointer';
+  for (const e of document.body.querySelectorAll('*')) {
+    if (taken.has(e) || covering.has(e)) continue;
+    const r=e.getBoundingClientRect(), x=r.x+r.width/2, y=r.y+r.height/2;
+    if (r.width<=0 || r.height<=0 || x<0 || y<0 || x>=innerWidth || y>=innerHeight) continue;
+    if (!pointer(e) || pointer(e.parentElement)) continue;
+    let inside=false;
+    for (let p=e.parentElement; p && !inside; p=p.parentElement) inside=taken.has(p);
+    if (inside || !visible(e) || e.closest('[aria-disabled="true"]')) continue;
+    const hit=document.elementFromPoint(x,y);
+    if (!hit || (hit!==e && !e.contains(hit)) || !reachable(x,y)) continue;
+    const own=name(e).replace(/\s+/g,' ').trim().slice(0,120);
+    if (!own) continue;
+    picked.push({e,r,rname:'button',own,pointer:true});
+  }
+  const labels=describe(picked), actions=[];
+  for (const {e,r,rname,pointer} of picked) {
+    const base={node:identity(e),role:rname,label:labels.get(e),
       rect:{x:r.x+dx,y:r.y+dy,w:r.width,h:r.height}};
+    if (pointer) { actions.push({...base,kind:'click',value:''}); continue; }
     for (const key of ['checked','selected','expanded']) {
       const value=e.getAttribute('aria-'+key);
       if (value!==null) base[key]=value;
@@ -173,30 +231,6 @@
       actions.push({...base,kind:editable?'fill':'click',value});
       if (editable) actions.push({...base,kind:'click',value,label:'Open '+base.label});
     }
-  }
-  // jevtest: 没有语义、只靠 cursor:pointer + 事件委托才可点的元素（jQuery/Bootstrap 时代的
-  // 下拉菜单 <li>、div 按钮）。上游的 selector 认不出它们：一次真跑里下拉菜单已经展开，
-  // 模型读得到「导入eBay产品库」却没有 id 可点，只好去点侧边栏里名字最像的「eBay 导入」链接。
-  // 只收最外层的 pointer 元素（子孙继承 cursor，不重复收），且与已有候选不重叠
-  // （包住候选的 <label>/卡片、候选内部的 <span> 都跳过）。追加在末尾，250 裁剪时先裁它们。
-  // role 记 button：它可能触发任何命令，只读模式按 button 剔除是保守的一侧。
-  const taken=new Set(actions.map(a=>cache.nodes.get(a.node))), covering=new Set();
-  for (const e of taken) for (let p=e.parentElement; p && !covering.has(p); p=p.parentElement) covering.add(p);
-  const pointer = e => !!e && getComputedStyle(e).cursor==='pointer';
-  for (const e of document.body.querySelectorAll('*')) {
-    if (taken.has(e) || covering.has(e)) continue;
-    const r=e.getBoundingClientRect(), x=r.x+r.width/2, y=r.y+r.height/2;
-    if (r.width<=0 || r.height<=0 || x<0 || y<0 || x>=innerWidth || y>=innerHeight) continue;
-    if (!pointer(e) || pointer(e.parentElement)) continue;
-    let inside=false;
-    for (let p=e.parentElement; p && !inside; p=p.parentElement) inside=taken.has(p);
-    if (inside || !visible(e) || e.closest('[aria-disabled="true"]')) continue;
-    const hit=document.elementFromPoint(x,y);
-    if (!hit || (hit!==e && !e.contains(hit)) || !reachable(x,y)) continue;
-    const label=name(e).replace(/\s+/g,' ').trim().slice(0,120);
-    if (!label) continue;
-    actions.push({node:identity(e),role:'button',label,rect:{x:r.x+dx,y:r.y+dy,w:r.width,h:r.height},
-      kind:'click',value:''});
   }
   const words=[], walker=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT);
   const range=document.createRange(); let node,length=0;

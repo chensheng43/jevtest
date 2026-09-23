@@ -399,15 +399,46 @@ e2e("观测：无名复选框的 label 带上所在表格行，表头全选框�
     const page = await session.goto(`${fixture.url}/table.html`, { waitUntil: "domcontentloaded" });
     const labels = page.actions.filter((action) => action.role === "checkbox").map((action) => action.label);
     assert.deepEqual(labels, [
-      "checkbox · header row (usually select all) · 标题 物品单价",
+      "checkbox · header row · 标题 物品单价",
       "checkbox · row 1 · Remote Control Car Toy SG$8.82",
       "checkbox · row 2 · LELEMAO Large Rechargeable RC Off-road Car SG$26.10",
       "checkbox · row 3 · Hot Wheels Basic Single Car SG$3.50",
-      "checkbox · header row (usually select all) · 账号",
+      "checkbox · header row · 账号",
       "checkbox · row 1 · 主账号",
       "checkbox · row 2 · 子账号",
       "保存图片",
       "checkbox",
+    ]);
+  });
+});
+
+e2e("观测：名字认不出是哪一个的候选（空 / 只是 placeholder / 重名），label 带上它所在那一组的文字", async () => {
+  // 这条来自一次真跑：「库存SKU:」与输入框并列、不写 for=，元素表里它只叫「请输入」，
+  // 文本模型不知道这是哪个字段，回了 text: null，整次运行就此终止。
+  // 几组「是 / 否」、一列「编辑」是同一类问题；名字够用的（aria-label、唯一的「复制」）原样不动。
+  // 没有 label 的 <select> 不拿选项文字当名字：真跑里那段两千多字的名字跟着每个选项重复，
+  // 决策请求超出了服务端的上限。
+  await wiring.pool.withSession({ tracing: false }, async (session) => {
+    const page = await session.goto(`${fixture.url}/form-items.html`, { waitUntil: "domcontentloaded" });
+    const labels = page.actions.filter((action) => action.node !== undefined && !action.label.startsWith("Open "))
+      .map((action) => action.label);
+    assert.deepEqual(labels, [
+      "请输入 · 库存SKU:",
+      "combobox → .3456 »",
+      "combobox → 007 »",
+      "combobox → 11",
+      "combobox → 0509",
+      "combobox → 12 »",
+      "请输入 · 产品备注:",
+      "是 · 组合产品: 是 否",
+      "否 · 组合产品: 是 否",
+      "是 · 多属性: 是 否",
+      "否 · 多属性: 是 否",
+      "重量（克）",
+      "编辑 · eBay 模板 A 编辑 复制",
+      "复制",
+      "编辑 · eBay 模板 B 编辑",
+      "搜索",
     ]);
   });
 });

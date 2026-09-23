@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>添加产品</title>
+  <style>
+    body { margin: 0; padding: 16px; font: 14px/1.5 sans-serif; }
+    .form-item { display: flex; gap: 8px; margin: 8px 0; }
+    .form-item__label { width: 100px; text-align: right; }
+  </style>
+</head>
+<body>
+  <!-- 来自一次真跑：组件库的表单项标签与输入框并列、不写 for=，上游把两个输入框都叫「请输入」。
+       几组「是 / 否」、一列「编辑」是同一类问题：名字本身分不出是哪一个 -->
+  <form class="form">
+    <div class="form-item">
+      <label class="form-item__label">库存SKU:</label>
+      <div class="form-item__content"><div class="input"><input type="text" placeholder="请输入" /></div></div>
+    </div>
+    <!-- 也来自真跑：分类选择器的几列 <select> 没有 label，上游拿全部选项的文字当名字 -->
+    <div class="form-item">
+      <label class="form-item__label">本地产品分类:</label>
+      <div class="form-item__content picker">
+        <div class="picker__col"><select size="4"><option>.3456 »</option><option>007 »</option><option>11</option></select></div>
+        <div class="picker__col"><select size="4"><option>0509</option><option>12 »</option></select></div>
+      </div>
+    </div>
+    <div class="form-item">
+      <label class="form-item__label">产品备注:</label>
+      <div class="form-item__content"><textarea placeholder="请输入"></textarea></div>
+    </div>
+    <div class="form-item">
+      <label class="form-item__label">组合产品:</label>
+      <div class="form-item__content">
+        <label><input type="radio" name="bundle" /> 是</label>
+        <label><input type="radio" name="bundle" checked /> 否</label>
+      </div>
+    </div>
+    <div class="form-item">
+      <label class="form-item__label">多属性:</label>
+      <div class="form-item__content">
+        <label><input type="radio" name="variants" /> 是</label>
+        <label><input type="radio" name="variants" checked /> 否</label>
+      </div>
+    </div>
+    <div class="form-item">
+      <label class="form-item__label">重量</label>
+      <div class="form-item__content"><input type="number" aria-label="重量（克）" placeholder="请输入" /></div>
+    </div>
+  </form>
+  <ul>
+    <li>eBay 模板 A <button type="button">编辑</button> <button type="button">复制</button></li>
+    <li>eBay 模板 B <button type="button">编辑</button></li>
+  </ul>
+  <div><input type="text" placeholder="搜索" /></div>
+</body>
+</html>
