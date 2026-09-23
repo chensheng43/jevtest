@@ -20,7 +20,7 @@ import assert from "node:assert/strict";
 
 import { CaseAgent, DEFAULT_NO_PROGRESS_LIMIT } from "../src/core/agent.ts";
 import { createBudgetMeter } from "../src/core/budget.ts";
-import { StalePage } from "../src/core/errors.ts";
+import { InputInterrupted, StalePage } from "../src/core/errors.ts";
 import { createScriptedEngine, constantSteps } from "../src/engine/scripted.ts";
 import type { ScriptedStep } from "../src/engine/scripted.ts";
 import type { DecisionEngine } from "../src/engine/types.ts";
@@ -229,6 +229,37 @@ test("act 抛 StalePage（输入前的新鲜度复查）时：决策作废、重
   assert.match(skipped.reason, /未执行|未收到任何输入/);
   // 起始页由 goto 给出（不计入 observeCalls），所以「重新观测一次」就是 1。
   assert.equal(session.observeCalls, 1, "作废之后必须重新观测一次");
+});
+
+test("act 抛 InputInterrupted（输入发出途中失败）时：按已执行记录、绝不重来", async () => {
+  // 输入可能已经部分生效（例如全选成功、插入文本时页面被关）。若当成 StalePage
+  // 重新决策再执行一遍，就是 §6.2 要防的双执行。
+  const pageA = richPage({ fingerprint: "fp-a" });
+  const pageB = richPage({ fingerprint: "fp-b" });
+  let actThrows = true;
+
+  const session = new FakeSession({
+    observations: [pageA, pageB],
+    onAct: () => {
+      if (actThrows) {
+        actThrows = false;
+        throw new InputInterrupted("动作 e1 的输入发出途中失败，可能已部分生效：Target closed");
+      }
+    },
+  });
+  const engine = createScriptedEngine({
+    steps: [{ operation: { choice: "CLICK" }, targets: { click_target: { choice: "1" } } }, done()],
+  });
+
+  const { report, events } = await runCase({ caseDef: makeCase(), session, engine });
+
+  assert.equal(session.actCount, 1, "act 只被调用一次：可能已生效的输入不能重放");
+  assert.equal(report.steps.length, 1, "这一步必须进轨迹：它可能已经生效");
+  assert.equal(stepAt(report, 0).executed, true);
+  assert.equal(eventsOf(events, "step.skipped").length, 0, "不是作废");
+  assert.equal(report.status, "done", "不判成运行故障：由后续观测说明页面发生了什么");
+  const warn = events.find((event) => event.type === "run.log" && event.level === "warn");
+  assert.ok(warn !== undefined, "要留下一条 warn 说明这一步的结果不确定");
 });
 
 // ---------------------------------------------------------------------------

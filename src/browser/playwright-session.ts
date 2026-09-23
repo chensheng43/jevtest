@@ -59,7 +59,7 @@ import { readFileSync } from "node:fs";
 import type { CDPSession, Frame, Page } from "playwright";
 import type { ActionKind } from "../schema/events.ts";
 import type { AdmissionStats } from "../schema/report.ts";
-import { JevtestError, OccludedTarget, StalePage, mapBrowserError } from "../core/errors.ts";
+import { InputInterrupted, JevtestError, OccludedTarget, StalePage, mapBrowserError } from "../core/errors.ts";
 import type {
   Action,
   GotoOptions,
@@ -525,6 +525,19 @@ export function createPlaywrightSession(options: PlaywrightSessionOptions): Sess
     }
   }
 
+  /** 输入分发阶段的失败一律归为 InputInterrupted（见 act 里的说明），不做 Stale 映射。 */
+  async function dispatchingInput(action: Action, call: () => Promise<void>): Promise<void> {
+    try {
+      await call();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new InputInterrupted(
+        `动作 ${action.id}（${action.label}）的输入发出途中失败，可能已部分生效：${message}`,
+        { cause: error },
+      );
+    }
+  }
+
   /** 预热：只在 REQUIRE_FOCUS_EMULATION 为真时做一次 CDP 往返，见文件头。 */
   let warmedUp: Promise<void> | null = null;
   function ensureReady(): Promise<void> {
@@ -726,12 +739,15 @@ export function createPlaywrightSession(options: PlaywrightSessionOptions): Sess
         );
       }
 
+      // 从这里起输入开始发出。此后的失败**不能**再走 guarded() 映射成 StalePage：
+      // agent 把 StalePage 当成「浏览器没收到任何输入、可以重新决策」，而这里输入
+      // 可能已经部分生效（全选成功、插入文本时页面被关），重来就是双执行（§6.2）。
       if (action.kind === "click") {
         // **真实坐标的鼠标事件，不是 locator.click()**（文件头第 1 条）
-        await guarded(() => page.mouse.click(resolution.x, resolution.y));
+        await dispatchingInput(action, () => page.mouse.click(resolution.x, resolution.y));
       } else if (action.kind === "fill") {
         // 原生 <select> 已经在上面那次 evaluate 里设好值了，这里没有后续输入
-        await guarded(async () => {
+        await dispatchingInput(action, async () => {
           await page.keyboard.press("ControlOrMeta+a");
           await page.keyboard.insertText(text as string);
         });

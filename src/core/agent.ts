@@ -70,7 +70,7 @@ import type { Action, Observation, Session } from "../browser/session.ts";
 import type { BudgetMeter } from "./budget.ts";
 import type { Resolved } from "./policy.ts";
 
-import { GuardrailBlocked, OccludedTarget, StalePage } from "./errors.ts";
+import { GuardrailBlocked, InputInterrupted, OccludedTarget, StalePage } from "./errors.ts";
 import { admit } from "../browser/admission.ts";
 import { assertAllowedOrigin, checkAction } from "./guard.ts";
 import {
@@ -405,7 +405,17 @@ export class CaseAgent {
         // ⚠️ 这条处理的正确性**依赖 act() 的抛出顺序**。若将来把某个「输入之后」的
         // 失败也抛成 StalePage，这里就会把一个已经生效的动作当成没发生——
         // 那正是 §6.2 要防的双执行。改 act 的抛出点时必须回来一起看这里。
-        if (error instanceof StalePage || error instanceof OccludedTarget) {
+        //
+        // 输入发出途中的失败由 act 抛成 InputInterrupted：动作**可能已经生效**，
+        // 所以既不重来、也不判运行故障，而是当作已执行照常记录，由接下来的观测说明结果。
+        if (error instanceof InputInterrupted) {
+          events.emit({
+            type: "run.log",
+            runId: this.runId,
+            level: "warn",
+            message: `${error.message}——按已执行记录，不重试`,
+          });
+        } else if (error instanceof StalePage || error instanceof OccludedTarget) {
           events.emit({
             type: "step.skipped",
             runId: this.runId,
@@ -416,10 +426,11 @@ export class CaseAgent {
           });
           this.page = await this.observeOnce();
           continue loop;
+        } else {
+          throw error;
         }
-        throw error;
       }
-      // 变更成功 -> 页面已不同 -> 为旧页面生成的文本不再可信
+      // 变更成功（或输入途中失败、可能已生效） -> 页面已不同 -> 为旧页面生成的文本不再可信
       this.textCache.clear();
 
       // ---- 11. 先记执行日志，再观测结果 -----------------------------------

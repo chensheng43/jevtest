@@ -38,6 +38,17 @@ export class OccludedTarget extends JevtestError {
 }
 
 /**
+ * 输入**已经开始发出**之后失败了：鼠标/键盘事件可能已经部分或全部生效。
+ *
+ * 与 StalePage / OccludedTarget 的根本区别：那两个保证「浏览器一个字节都没收到」，
+ * 调用方可以丢掉决策重来；这个**不能重来**——重来就可能是双击、重复输入（§6.2）。
+ * 调用方应当把这一步当作已执行，照常记录并重新观测，由观测结果说明发生了什么。
+ */
+export class InputInterrupted extends JevtestError {
+  override readonly name = "InputInterrupted";
+}
+
+/**
  * 模型输出不合法：choice 不在候选集内、概率键不匹配、概率和不为 1、
  * choice 不是最大值。**此时绝不能执行任何动作。**
  */
