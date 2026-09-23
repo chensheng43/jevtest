@@ -161,6 +161,8 @@ function makeHarness(input: {
   engineError?: Error;
   /** 让 persist 抛错（磁盘满 / 权限），用来验「落盘失败也要宣告结束」 */
   persistError?: Error;
+  /** 每次决策前等多久（毫秒）。用来让某个用例「跑得慢」，占住 worker */
+  decideDelayMs?: (caseDef: Case) => number;
 }): Harness {
   const settings = testSettings({
     ...(input.workers === undefined ? {} : { workers: input.workers }),
@@ -194,7 +196,11 @@ function makeHarness(input: {
       return {
         name: inner.name,
         capabilities: inner.capabilities,
-        decide: (req, signal) => inner.decide(req, signal),
+        decide: async (req, signal) => {
+          const delay = input.decideDelayMs?.(caseDef) ?? 0;
+          if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
+          return await inner.decide(req, signal);
+        },
         writeText: (req, signal) => inner.writeText(req, signal),
         close: async () => {
           record.closed = true;
@@ -367,6 +373,26 @@ test("批量入队：共用 suiteRunId，每个用例一个引擎实例，并发
   assert.equal(harness.runner.status().contextsActive, 0);
 
   harness.runner.cancelAll();
+  await harness.runner.stop();
+});
+
+test("墙钟预算从开跑算起，不从入队算起：排在后面的用例不会因为排队而超时", async () => {
+  // 一个 worker；前一个用例每次决策慢 150ms，至少占住 worker 300ms。
+  // 后一个用例的墙钟预算只有 200ms——若从入队开始计时，它开跑时就已超限。
+  const harness = makeHarness({
+    workers: 1,
+    decideDelayMs: (caseDef) => (caseDef.id === "slow-case" ? 150 : 0),
+  });
+  harness.runner.start();
+
+  const slow = makeCase({ id: "slow-case" });
+  const tight = makeCase({ id: "tight-case", budget: { maxElapsedMs: 200 } });
+  const reports = await runAll(harness, [slow, tight]);
+  const tightReport = reports.find((report) => report.caseId === "tight-case");
+
+  assert.ok(tightReport !== undefined);
+  assert.equal(tightReport.status, "done", `排队时间被算进了预算：${tightReport.failureReason ?? ""}`);
+  assert.ok(tightReport.stats.elapsedMs < 200, `elapsedMs 不该含排队时间：${tightReport.stats.elapsedMs}`);
   await harness.runner.stop();
 });
 

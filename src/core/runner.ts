@@ -182,9 +182,15 @@ interface ActiveRun {
   caseDef: Case;
   options: RunOptions;
   enqueuedAt: string;
+  /** worker 真正开始跑它的时刻；还在排队时为 null */
+  startedAt: string | null;
   /** per-run 信号。入队即创建：排队期间就被取消是正常路径 */
   controller: AbortController;
-  /** 预算计量器。**RunStats 的唯一持有者**，runner 只把它交给 agent 再收回来 */
+  /**
+   * 预算计量器。**RunStats 的唯一持有者**，runner 只把它交给 agent 再收回来。
+   * 在 worker 开跑时才重建：墙钟预算从入队算起的话，排队时间会被记到用例头上，
+   * 批量跑时排在后面的用例一打开页面就判 budget_exceeded。
+   */
   budget: BudgetMeter;
   /** 借出 session 之后才有；失败路径靠它取回已完成的那段轨迹 */
   agent: CaseAgent | null;
@@ -316,7 +322,7 @@ export function createRunnerService(deps: RunnerDeps): RunnerService {
       caseDef: active.caseDef,
       engine,
       suiteRunId: active.options.suiteRunId ?? null,
-      startedAt: active.enqueuedAt,
+      startedAt: active.startedAt ?? active.enqueuedAt,
       finishedAt: new Date().toISOString(),
       status,
       failureReason,
@@ -358,6 +364,7 @@ export function createRunnerService(deps: RunnerDeps): RunnerService {
       caseDef,
       options,
       enqueuedAt: new Date().toISOString(),
+      startedAt: null,
       controller: new AbortController(),
       budget: createBudgetMeter(budgetOf(caseDef)),
       agent: null,
@@ -369,6 +376,9 @@ export function createRunnerService(deps: RunnerDeps): RunnerService {
 
   async function runOne(active: ActiveRun): Promise<void> {
     activeRuns.set(active.runId, active);
+    // 计时从这里开始，不从入队开始（见 ActiveRun.budget）
+    active.startedAt = new Date().toISOString();
+    active.budget = createBudgetMeter(budgetOf(active.caseDef));
     const { caseDef } = active;
     // 用例声明的引擎可被 options 覆盖（同一用例的 A/B 对比）。
     // createEngine 只收 caseDef，所以覆盖通过复制一份 caseDef 完成。
