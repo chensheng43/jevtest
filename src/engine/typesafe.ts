@@ -176,7 +176,7 @@ export function createTypeSafeEngine(options: TypeSafeOptions): DecisionEngine {
           `未配置文本模型，需要 TYPE_TEXT 的用例无法运行：这一步要在字段「${req.field.label}」` +
             `（role: ${req.field.role}）里输入取值，而没有文本模型就无法生成它。` +
             `请配置 TYPE_TEXT 所需的三项（见 .env.example）：textModelApiKey / textModelBaseUrl / textModel` +
-            `（环境变量 JEVTEST_TEXT_MODEL_API_KEY / JEVTEST_TEXT_MODEL_BASE_URL / JEVTEST_TEXT_MODEL），` +
+            `（环境变量 TEXT_MODEL_API_KEY / TEXT_MODEL_BASE_URL / TEXT_MODEL），` +
             `并用 \`jevtest doctor\` 复查。**绝不猜一个值。**`,
         );
       }
@@ -366,7 +366,7 @@ async function postJson(o: PostOptions): Promise<{ json: unknown; requests: numb
   if (o.apiKey.trim().length === 0) {
     throw new EngineRequestError(
       `${o.what}请求无法发出：未配置 API key，没有任何浏览器动作被执行。` +
-        `请设置 TYPESAFE_API_KEY（文本模型则是 JEVTEST_TEXT_MODEL_API_KEY），并用 \`jevtest doctor\` 复查。`,
+        `请设置 TYPESAFE_API_KEY（文本模型则是 TEXT_MODEL_API_KEY），并用 \`jevtest doctor\` 复查。`,
     );
   }
 

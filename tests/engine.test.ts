@@ -848,6 +848,9 @@ test("未配置文本模型时 writeText 直接报错，绝不猜一个值", asy
   assert.equal(endpoint.requests.length, 0, "没有文本模型就不该有任何请求");
   assert.match(error.message, /未配置文本模型/);
   assert.match(error.message, /textModelApiKey/);
+  // 提示里的环境变量名必须是 config.ts 真正读的那个——照着一个不存在的名字去设，配置不会生效
+  assert.match(error.message, /\bTEXT_MODEL_API_KEY\b/);
+  assert.doesNotMatch(error.message, /JEVTEST_TEXT_MODEL/);
   await engine.close();
 });
 
