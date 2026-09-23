@@ -341,8 +341,11 @@ export function createCaseStore(options: CaseStoreOptions): CaseStore {
       // 消息里带当前 revision，界面据此提示「重新加载后再改」；
       // 猜一个「就用最新版覆盖」等于把用户的编辑悄悄扔掉
       throw new CaseConflict(
-        `用例 "${caseId}" 已被改动：磁盘上是 revision ${current}，请求基于 revision ${expectedRevision}。` +
-          `请重新加载用例后再保存。`,
+        expectedRevision === 0
+          ? `用例 "${caseId}" 已存在（revision ${current}）：新建时不能使用已有的 id。` +
+              `要修改它，请先载入该用例再保存（请求需带 expectedRevision）。`
+          : `用例 "${caseId}" 已被改动：磁盘上是 revision ${current}，请求基于 revision ${expectedRevision}。` +
+              `请重新加载用例后再保存。`,
       );
     }
 

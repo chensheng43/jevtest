@@ -22,7 +22,7 @@ import { MAX_BODY_BYTES, TOKEN_HEADER } from "../src/web/security.ts";
 import type { SecurityContext } from "../src/web/security.ts";
 import type { Services } from "../src/web/api.ts";
 import type { Settings } from "../src/config.ts";
-import type { CaseStore } from "../src/store/cases.ts";
+import type { CaseStore, WriteOptions } from "../src/store/cases.ts";
 import type { CaseRevision } from "../src/schema/case.ts";
 import { CaseConflict, CaseNotFound } from "../src/store/cases.ts";
 import type { RunnerService, QueueStatus } from "../src/core/runner.ts";
@@ -49,6 +49,9 @@ function testSettings(overrides: Partial<Settings>): Settings {
   };
 }
 
+/** 最近一次 `store.write` 收到的选项：路由怎么传乐观锁参数，只能从这里取证。 */
+const writeOptionsSeen: Array<WriteOptions | undefined> = [];
+
 /** 只实现路由会用到的那部分用例仓库。 */
 function makeFakeStore(options: { conflict?: boolean; missing?: boolean } = {}): CaseStore {
   const revision = (caseId: string): CaseRevision => ({
@@ -73,7 +76,8 @@ function makeFakeStore(options: { conflict?: boolean; missing?: boolean } = {}):
         yaml: "id: x\n",
       };
     },
-    write: async (def) => {
+    write: async (def, writeOptions) => {
+      writeOptionsSeen.push(writeOptions);
       guardWrite();
       return revision(def.id ?? "allocated");
     },
@@ -308,6 +312,18 @@ test("POST /api/cases 成功返回 CaseRevision", async () => {
   assert.equal(res.status, 200);
   const body = JSON.parse(res.body) as CaseRevision;
   assert.equal(body.revision, 3);
+});
+
+test("POST /api/cases 不带 expectedRevision 时按「新建」处理（期望 revision 0），不能绕过乐观锁", async () => {
+  writeOptionsSeen.length = 0;
+  const res = await raw(port, {
+    method: "POST",
+    path: "/api/cases",
+    headers: authed(),
+    body: JSON.stringify({ id: "abc", title: "t", goal: "g", startUrl: "https://e.com" }),
+  });
+  assert.equal(res.status, 200);
+  assert.deepEqual(writeOptionsSeen, [{ expectedRevision: 0 }]);
 });
 
 test("乐观锁冲突返回 409 且带上当前 revision", async () => {

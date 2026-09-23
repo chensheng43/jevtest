@@ -375,6 +375,16 @@ describe("revision 从 revisions/ 目录推导，不维护计数器文件", () =
 // ---------------------------------------------------------------------------
 
 describe("乐观锁（expectedRevision）", () => {
+  it("expectedRevision 为 0（新建）而 id 已存在时拒绝，不静默覆盖", async (t) => {
+    const lib = await makeLibrary(t);
+    await lib.store.write(definition({ id: "flights", goal: "原来的" }));
+
+    const error = await rejection(lib.store.write(definition({ id: "flights", goal: "重名新建" }), { expectedRevision: 0 }));
+    assert.ok(error instanceof CaseConflict);
+    assert.match(error.message, /已存在/);
+    assert.ok(!(await readFile(caseFile(lib, "flights"), "utf8")).includes("重名新建"));
+  });
+
   it("expectedRevision 与磁盘一致时写入成功", async (t) => {
     const lib = await makeLibrary(t);
     const first = await lib.store.write(definition({ id: "flights" }));

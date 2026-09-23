@@ -1680,6 +1680,13 @@ async function viewCaseEditor(app, caseId) {
       notices.append(el("div", { class: "alert alert-success", role: "status", text: `已保存为 r${revision}。` }));
     } catch (error) {
       if (error.status === 409) {
+        if (caseId === null) {
+          // 新建时撞上已有 id：没有「别人改过的版本」可重新加载，换个 id 即可
+          const box = errorBox(error);
+          box.append(el("p", { class: "hint", text: "换一个 id，或清空 id 让服务端按标题生成。" }));
+          notices.replaceChildren(box);
+          return;
+        }
         showConflict(error);
         return;
       }

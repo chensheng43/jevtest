@@ -278,8 +278,10 @@ async function handleCases(
       // 不是信任边界。校验失败时把 issue 路径回传。
       // 这里的断言是**安全的**：`store.write` 内部第一步就是
       // `CaseDefinitionSchema.parse()`，任何不合规的字段都会在那里被拦下并抛出。
+      // 不带 expectedRevision 一律按「新建」处理（期望 revision 0）：否则带一个已存在的 id
+      // 就能绕过乐观锁静默覆盖原用例——新建用例时填了个重名 id 也会这样。
       const revision = await store.write(definition as unknown as CaseDefinition, {
-        ...(typeof expectedRevision === "number" ? { expectedRevision } : {}),
+        expectedRevision: typeof expectedRevision === "number" ? expectedRevision : 0,
       });
       return ok(revision);
     } catch (error) {
