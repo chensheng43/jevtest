@@ -19,7 +19,7 @@
 | 结果卡片 | 动态渲染的卡片 + 「查看详情」按钮 | 动态内容出现后的观测、按语义标签定位 |
 | 详情页 | 返回按钮 + 面包屑 | 导航后的新鲜度判定（旧文档必须失效） |
 | 危险按钮 | 「删除此项目」 | 护栏拦截：断言 `session.act` **调用次数为 0** |
-| 陷阱元素 | 移出视口 / 被浮层遮挡 / 中途被禁用的按钮 | 执行前的几何重解析与遮挡命中测试 |
+| 陷阱元素 | 移出视口 / 一直被浮层盖住 / 观测后被浮层盖住 / 中途被禁用的按钮 | 观测时的遮挡过滤；执行前的几何重解析与遮挡命中测试 |
 
 最后两类是这个站点最重要的价值——**它们把参考项目里靠人工核对的安全性质
 变成了可自动化的断言**。参考项目用 `scripts/check_guards.py` 的
@@ -35,6 +35,7 @@
 | `app.js` | 动态渲染（rAF）、自动补全候选（setTimeout）、陷阱定时器、`window.__fixture` 状态 |
 | `detail.js` | 详情页填充与返回 |
 | `frames.html` | 一个同源 + 一个跨域 iframe（跨域靠换成 `localhost` 访问同一服务），给准入探测的 frame 计数用 |
+| `late.html` + `late.json` | 按钮在 DOMContentLoaded 之后由一次慢接口（`?delay=800`）拉回来，给「打开起始页先等网络安静」用 |
 
 配套的静态服务在 `tests/e2e/fixture-server.ts`，导出
 `startFixtureServer(): Promise<{ url: string; close(): Promise<void> }>`，
@@ -59,7 +60,7 @@
 - `index.html?trapDelay=<ms>` —— 覆写陷阱元素的生效延迟（默认 1500ms）。
   调大可以放宽「观测时有效、执行前失效」这个时间窗，便于在慢机器上排查。
 - `window.__fixture` —— 页面上的状态：`deleted` / `searched` / `navigated` /
-  `trapClicked` / `trapMoved` / `trapDisabled` / `trapDelayMs`。
+  `trapClicked` / `trapMoved` / `trapDisabled` / `trapOccluded` / `trapDelayMs`。
   **它是安全断言的物证**：护栏拦下动作时，`trapClicked` 与 `deleted`
   必须仍是初始值——只看 `status` 是不够的。
 

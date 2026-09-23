@@ -248,6 +248,7 @@ function svg(d, size = 20, className = "") {
 
 const ICON_CASES = "M4 5h16v14H4zM8 9h8M8 13h8M8 17h4";
 const ICON_RUNS = "M4 6h16v14H4zM8 3v4M16 3v4M4 11h16";
+const ICON_KEY = "M14 10a4 4 0 1 0-4 4M10 14l-6 6M6 18l2 2M8 16l2 2M14 10l6-6";
 
 /** 空状态：图标 + 标题 + 说明（+ 可选动作）。空列表不该只是一行灰字。 */
 function emptyState({ icon, title, children = [] }) {
@@ -534,7 +535,10 @@ async function viewCases(app) {
     // 标题是主行、id 与版本退到次行：扫列表时先认出「哪个用例」，而不是先读一串 id。
     const nameCell = el("td", {}, [
       el("a", { class: "row-title", href: `#/case/${item.id}`, text: item.title || item.id }),
-      el("div", { class: "row-meta mono", text: `${item.id} · r${item.revision}` }),
+      el("div", {
+        class: "row-meta mono",
+        text: `${item.id} · r${item.revision}${item.authState ? ` · 登录态 ${item.authState}` : ""}`,
+      }),
     ]);
 
     const runCell = item.lastRun
@@ -552,14 +556,21 @@ async function viewCases(app) {
           class: "btn btn-sm btn-outline-primary",
           text: "运行",
           onclick: async (event) => {
-            event.target.disabled = true;
-            try {
-              const { runIds } = await call("/api/runs", { method: "POST", body: { caseIds: [item.id] } });
-              location.hash = `#/run/${runIds[0]}`;
-            } catch (error) {
-              notices.replaceChildren(errorBox(error));
-              event.target.disabled = false;
-            }
+            const button = event.target;
+            button.disabled = true;
+            const run = async () => {
+              try {
+                await runCaseAndOpen(item.id);
+              } catch (error) {
+                notices.replaceChildren(errorBox(error));
+                button.disabled = false;
+              }
+            };
+            const preflight = await loginPreflight(item, { onRun: run });
+            if (preflight === null) return run();
+            notices.replaceChildren(preflight);
+            preflight.scrollIntoView({ behavior: "smooth", block: "nearest" });
+            button.disabled = false;
           },
         }),
         // 删除收进折叠里：它是破坏性的、又不可撤销，不该和「运行」并排抢点击。
@@ -604,6 +615,8 @@ function emptyDraft() {
     startUrl: "",
     mode: "interactive",
     allowedOrigins: [],
+    // "" = 不带登录态。与其他字段一样，空串不落盘
+    authState: "",
     engine: "",
     budget: {},
     guardrails: [],
@@ -902,6 +915,7 @@ function formToDefinition(draft) {
 
   const origins = cleanStrings(draft.allowedOrigins);
   if (origins.length > 0) definition.allowedOrigins = origins;
+  if (draft.authState) definition.authState = draft.authState;
 
   const budget = {};
   for (const [key] of BUDGET_FIELDS) {
@@ -1025,6 +1039,24 @@ function normalizeDraft(def) {
   };
 }
 
+/**
+ * 从地址推一个登录态名字：取主机名的第一段，规整成 `[a-z0-9-]`。
+ * `https://shop_test9.example.com/x` -> `shop-test9`。只是建议值，用户可改。
+ */
+function suggestAuthName(url) {
+  let host = "";
+  try {
+    host = new URL(String(url)).hostname;
+  } catch {
+    return "";
+  }
+  // IP 地址推不出有意义的名字，留空让人自己填
+  if (/^[\d.]+$/.test(host) || host.includes(":")) return "";
+  const first = host.split(".")[0] === "www" ? host.split(".")[1] ?? "" : host.split(".")[0] ?? "";
+  const slug = first.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 64);
+  return slug.length >= 2 ? slug : "";
+}
+
 /** 草稿的指纹，用来判断「改了没有」。比字段级 diff 便宜，也够用。 */
 function signature(value) {
   return JSON.stringify(value);
@@ -1036,6 +1068,13 @@ async function viewCaseEditor(app, caseId) {
 
   const loaded = caseId === null ? null : await call(`/api/cases/${caseId}`);
   const draft = loaded === null ? emptyDraft() : normalizeDraft(loaded.def);
+  // 登录态列表只是下拉框的选项。读不到不该让编辑器打不开——退化成空列表，用例里写的值照样保留
+  let authStates = await call("/api/auth-states").catch(() => []);
+  /** 磁盘上这个用例现在用的登录态。与草稿不同 = 选了但还没保存，运行不会带上它 */
+  let savedAuthState = loaded?.def.authState ?? "";
+  let refreshAuthStatus = null;
+  /** 「检测页面」发现被跳到登录页时，用它把登录流程直接开在登录态字段下面 */
+  let openLoginFlow = null;
   let revision = loaded === null ? null : loaded.revision.revision;
   const baseline = signature(formToDefinition(draft));
 
@@ -1251,6 +1290,7 @@ async function viewCaseEditor(app, caseId) {
         hintText: "唯一的行为指令。**断言不参与其中**——让 agent 看见判分标准会诱导它对着答案演戏。",
       }),
       draftField("startUrl", "起始地址 startUrl", { required: true, type: "url", placeholder: "https://en.wikipedia.org" }),
+      authStateField(),
       draftSelect("mode", "模式 mode", [
         ["interactive", "interactive（默认：允许变更型操作）"],
         ["readonly", "readonly（不改变任何页面状态）"],
@@ -1270,6 +1310,141 @@ async function viewCaseEditor(app, caseId) {
     refreshOriginsNotice();
     // startUrl 改了要跟着更新那句「必须包含的 origin」，所以这里多挂一个监听。
     basicPanel.addEventListener("input", refreshOriginsNotice);
+  }
+
+  /**
+   * 登录态：下拉选一份，或者就地新建。
+   *
+   * **就地**是刻意的：跳去「登录态」页会丢掉这里还没保存的草稿。
+   * 新建完自动选上，并把那一次验证的结论显示在下拉框下面。
+   */
+  function authStateField() {
+    const select = el("select", { class: "form-select" });
+    select.dataset.path = "authState";
+    const status = el("div", { class: "auth-state-status" });
+    const flowSlot = el("div");
+
+    const fill = () => {
+      const current = draft.authState ?? "";
+      const options = [["", "不使用（以未登录的全新浏览器打开）"]].concat(
+        authStates.map((item) => [item.name, `${item.name}（${sitesText(item.sites)}）`]),
+      );
+      // 用例引用了一份已经不存在的登录态：保留这一项并标出来。
+      // 静默落回「不使用」等于替用户改了用例，而他根本不知道。
+      if (current !== "" && !authStates.some((item) => item.name === current)) {
+        options.push([current, `${current}（不存在，运行会失败）`]);
+      }
+      select.replaceChildren(
+        ...options.map(([value, text]) => {
+          const option = el("option", { value, text });
+          if (value === current) option.selected = true;
+          return option;
+        }),
+      );
+      refreshStatus();
+    };
+
+    const refreshStatus = () => {
+      const name = draft.authState ?? "";
+      const chosen = authStates.find((item) => item.name === name);
+      // 选了但没保存：运行用的是磁盘上的版本，不会带上它。这一句必须显眼——
+      // 「登录态已保存」与「用例已保存」是两件事，界面上最容易混。
+      const pending = name !== savedAuthState
+        ? el("div", { class: "auth-pending" }, [
+            el("span", {
+              text: name === ""
+                ? "已改为不使用登录态，但用例还没保存。"
+                : `已选上 ${name}，但用例还没保存——现在运行不会带上它。`,
+            }),
+            el("button", { type: "button", class: "btn btn-sm btn-primary", text: "保存用例", onclick: () => void save() }),
+          ])
+        : null;
+      if (name === "") {
+        setChildren(status, [
+          pending,
+          hint("目标页要求登录时选一份；没有合适的就点「新建」，在弹出的浏览器里登录一次即可。**密码不经过模型。**"),
+        ]);
+        return;
+      }
+      if (chosen === undefined) {
+        setChildren(status, [
+          pending,
+          el("p", { class: "blocking", text: `登录态 ${name} 不存在：点「新建」建一份同名的，或换一个。` }),
+        ]);
+        return;
+      }
+      const verified = chosen.lastVerified;
+      setChildren(status, [
+        pending,
+        el("div", { class: "verify-line" }, [
+          verifyBadge(verified),
+          el("span", { class: "hint", text: verified ? verified.detail : `保存于 ${relativeTime(chosen.savedAt)}，还没验证过` }),
+          verified && !verified.ok
+            ? el("button", {
+                type: "button",
+                class: "btn btn-sm btn-outline-primary",
+                text: "重新登录",
+                onclick: () => openFlow({ name: chosen.name, url: chosen.loginUrl ?? draft.startUrl ?? "", overwrite: true }),
+              })
+            : null,
+        ]),
+      ]);
+    };
+
+    const openFlow = (options) => {
+      flowSlot.replaceChildren(
+        loginFlow({
+          ...options,
+          onSaved: async (summary) => {
+            authStates = await call("/api/auth-states").catch(() => authStates);
+            writePath(draft, "authState", summary.name);
+            fill();
+            refreshSummary();
+          },
+          onClose: () => flowSlot.replaceChildren(),
+          savedNext: (summary) =>
+            caseId === null
+              ? hint(`已在上面选上 **${summary.name}**。填完用例点「创建」后生效。`)
+              : el("div", { class: "auth-pending" }, [
+                  el("span", { text: `已在上面选上 ${summary.name}。还要保存用例，运行时才会带上它。` }),
+                  el("button", { type: "button", class: "btn btn-sm btn-primary", text: "保存用例", onclick: () => void save() }),
+                ]),
+        }),
+      );
+    };
+    openLoginFlow = (overwrite) => {
+      const name = draft.authState ?? "";
+      const known = authStates.find((item) => item.name === name);
+      openFlow(
+        overwrite && known !== undefined
+          ? { name, url: known.loginUrl ?? draft.startUrl ?? "", overwrite: true }
+          : { url: draft.startUrl ?? "" },
+      );
+      flowSlot.scrollIntoView({ behavior: "smooth", block: "center" });
+    };
+
+    select.addEventListener("change", () => {
+      writePath(draft, "authState", select.value);
+      refreshStatus();
+      refreshSummary();
+    });
+    refreshAuthStatus = refreshStatus;
+    const newButton = el("button", {
+      type: "button",
+      class: "btn btn-outline-secondary",
+      text: "+ 新建",
+      onclick: () => openFlow({ url: draft.startUrl ?? "" }),
+    });
+
+    fill();
+    return el("div", { class: "mb-3" }, [
+      el("label", { class: "d-block" }, [
+        el("span", { class: "form-label", text: "登录态 authState" }),
+        el("div", { class: "input-group" }, [select, newButton]),
+      ]),
+      status,
+      flowSlot,
+    ]);
   }
 
   function renderAssertions() {
@@ -1677,6 +1852,8 @@ async function viewCaseEditor(app, caseId) {
       }
       revision = result.revision;
       versionNote.textContent = `当前版本 r${revision}`;
+      savedAuthState = draft.authState ?? "";
+      refreshAuthStatus?.();
       notices.replaceChildren();
       refreshSummary();
       notices.append(el("div", { class: "alert alert-success", role: "status", text: `已保存为 r${revision}。` }));
@@ -1726,7 +1903,22 @@ async function viewCaseEditor(app, caseId) {
     admitButton.disabled = true;
     try {
       const result = await call(`/api/cases/${caseId}/admit`, { method: "POST" });
-      notices.replaceChildren(admissionBox(result));
+      const box = admissionBox(result);
+      if (result.redirectedTo) {
+        // 被跳到登录页：给出能直接点的下一步，而不是只列一条阻断项
+        box.append(
+          el("button", {
+            type: "button",
+            class: "btn btn-sm btn-primary",
+            text: draft.authState ? `重新登录 ${draft.authState}` : "配置登录态",
+            onclick: () => {
+              tabbar.select("basic");
+              openLoginFlow?.(Boolean(draft.authState));
+            },
+          }),
+        );
+      }
+      notices.replaceChildren(box);
     } catch (error) {
       notices.replaceChildren(errorBox(error));
     } finally {
@@ -1823,6 +2015,660 @@ function admissionBox(report) {
     }),
   );
   return box;
+}
+
+// ---------------------------------------------------------------------------
+// 登录态：共用组件
+// ---------------------------------------------------------------------------
+
+/** 登录窗口状态的轮询间隔。人在另一个窗口里登录，1.5s 刷一次「当前停在哪」足够 */
+const LOGIN_POLL_MS = 1500;
+
+/** 最近一次验证的结论。没验证过是「未验证」——不能画成有效，也不能画成失效 */
+function verifyBadge(lastVerified) {
+  if (!lastVerified) return badge("undecided", "?", "未验证");
+  return lastVerified.ok ? badge("passed", "✓", "看起来有效") : badge("failed", "✕", "已失效");
+}
+
+/** 覆盖站点：最多列三个，其余折成「等 N 个」 */
+function sitesText(sites) {
+  if (sites.length === 0) return "（无 cookie）";
+  return sites.length <= 3 ? sites.join("、") : `${sites.slice(0, 3).join("、")} 等 ${sites.length} 个`;
+}
+
+/** 这份登录态有没有覆盖 `url` 的主机（cookie 域按后缀匹配：`.example.com` 覆盖 `a.example.com`） */
+function authCovers(state, url) {
+  let host = "";
+  try {
+    host = new URL(String(url)).hostname;
+  } catch {
+    return false;
+  }
+  return state.sites.some((site) => host === site || host.endsWith(`.${site}`));
+}
+
+/**
+ * 覆盖 `url` 的登录态，最可能是对的排前面：验证有效的 > 没验证过的 > 已失效的；
+ * 同档里，登录地址与目标同 origin 的优先（在这个站点上登录的那份），再按保存时间新的优先。
+ */
+function rankCandidates(states, url) {
+  const origin = originOf(url);
+  const verdict = (state) => (state.lastVerified === null ? 1 : state.lastVerified.ok ? 0 : 2);
+  return states
+    .filter((state) => authCovers(state, url))
+    .sort((a, b) =>
+      verdict(a) - verdict(b)
+      || Number(originOf(b.loginUrl ?? "") === origin) - Number(originOf(a.loginUrl ?? "") === origin)
+      || String(b.savedAt).localeCompare(String(a.savedAt)));
+}
+
+/**
+ * 把登录态写进一个**已保存**的用例并保存。带 expectedRevision：用例在别处被改过时照常 409，
+ * 不静默覆盖。返回新的 revision。
+ */
+async function applyAuthStateToCase(caseId, name) {
+  const loaded = await call(`/api/cases/${caseId}`);
+  const result = await call("/api/cases", {
+    method: "POST",
+    body: { ...loaded.def, authState: name, expectedRevision: loaded.revision.revision },
+  });
+  return result.revision;
+}
+
+/**
+ * 「把登录态用到某个用例」的按钮。点完原地变成结果 + 「重新运行」。
+ * 登录态页（带着用例跳过来时）与结果页共用。
+ */
+function applyToCaseButton(caseId, caseTitle, name, label = `用到用例「${caseTitle || caseId}」并保存`) {
+  const slot = el("span", { class: "apply-to-case" });
+  const button = el("button", { type: "button", class: "btn btn-sm btn-primary", text: label });
+  button.addEventListener("click", async () => {
+    button.disabled = true;
+    try {
+      const revision = await applyAuthStateToCase(caseId, name);
+      setChildren(slot, [
+        el("span", { class: "hint", text: `用例已保存为 r${revision}，运行时会带上登录态 ${name}。` }),
+        el("button", {
+          type: "button",
+          class: "btn btn-sm btn-outline-primary",
+          text: "重新运行",
+          onclick: () => runCaseAndOpen(caseId),
+        }),
+      ]);
+    } catch (err) {
+      button.disabled = false;
+      slot.append(errorBox(err));
+    }
+  });
+  slot.append(button);
+  return slot;
+}
+
+/** 跑一个用例并跳到它的结果页 */
+async function runCaseAndOpen(caseId) {
+  const { runIds } = await call("/api/runs", { method: "POST", body: { caseIds: [caseId] } });
+  location.hash = `#/run/${runIds[0]}`;
+}
+
+/**
+ * 「运行」之前的检查：用例没选登录态、而**上一次运行**一打开就被跳去登录——
+ * 照原样再跑一次只会以同样的方式失败，所以先问一句，并把能用的登录态摆出来。
+ *
+ * 只在这一种情况下拦：不需要登录的用例、已经选了登录态的用例、上次不是这样失败的，
+ * 都直接跑，不多一次点击。返回 `null` 表示放行。
+ * （实测：人在登录态页建好、验证好登录态，回到用例列表点「运行」，以为这就会带上——
+ * 连续两次都是这样失败的。）
+ */
+async function loginPreflight(item, { onRun }) {
+  if (item.authState !== null || item.lastRun?.status !== "guardrail_blocked") return null;
+  const report = await call(`/api/runs/${item.lastRun.runId}`).catch(() => null);
+  if (report === null || !looksLikeLoginRedirect(report)) return null;
+
+  const states = await call("/api/auth-states").catch(() => []);
+  const candidates = rankCandidates(states, item.startUrl);
+  const title = item.title || item.id;
+  const box = el("div", { class: "alert alert-warning login-preflight" }, [
+    el("strong", { text: `「${title}」上次一打开就被跳去了登录页，而用例没有选登录态。` }),
+    el("span", {
+      text: candidates.length > 0
+        ? " 登录态要在用例里选上并保存，运行才会带上——选一份再跑："
+        : " 照原样再跑还会被拦下。先登录一次存成登录态，再用到这个用例上。",
+    }),
+  ]);
+  const actions = el("div", { class: "login-flow-actions" });
+  for (const state of candidates) {
+    const button = el("button", { type: "button", class: "btn btn-sm btn-primary", text: `用 ${state.name} 并运行` });
+    button.addEventListener("click", async () => {
+      button.disabled = true;
+      try {
+        await applyAuthStateToCase(item.id, state.name);
+        await runCaseAndOpen(item.id);
+      } catch (err) {
+        button.disabled = false;
+        box.append(errorBox(err));
+      }
+    });
+    actions.append(el("span", { class: "verify-line" }, [button, verifyBadge(state.lastVerified)]));
+  }
+  actions.append(
+    el("a", {
+      class: `btn btn-sm ${candidates.length > 0 ? "btn-outline-primary" : "btn-primary"}`,
+      href: `#/auth?new=1&url=${encodeURIComponent(item.startUrl)}&case=${encodeURIComponent(item.id)}`,
+      text: "新建登录态",
+    }),
+    el("button", { type: "button", class: "btn btn-sm btn-link", text: "仍然直接运行", onclick: onRun }),
+  );
+  box.append(actions);
+  return box;
+}
+
+/**
+ * 「新建 / 重新登录」的整个流程，登录态页与用例编辑器共用。
+ *
+ * 三个阶段画在同一块里，不跳页：
+ *   填表  -> 弹窗等人登录（轮询窗口状态） -> 已保存（自动验证一次）
+ * 在编辑器里不跳页尤其要紧：跳去别的页面会丢掉还没保存的用例草稿。
+ *
+ * 另有一条「上传 storageState」的兜底路径，给弹不出窗口的环境（Docker、远程 Linux）。
+ *
+ * `overwrite: true` 用于「重新登录」：名字锁定、覆盖已有文件。
+ * `resume` 传入一个已经开着的窗口状态时，直接从「等人登录」阶段开始——
+ * 人开了窗口又切走了页面，回来时不该看到一个空表单。
+ */
+function loginFlow({
+  name = "",
+  url = "",
+  overwrite = false,
+  resume = null,
+  onSaved = null,
+  onClose = null,
+  // 保存完之后「下一步」的内容。**登录态存好了不等于用例用上了它**——
+  // 这一步不画出来，人会以为已经配好，直接去跑（实际踩过：用例没保存，跑出来还是被跳走）。
+  savedNext = null,
+} = {}) {
+  const box = el("div", { class: "card login-flow" });
+  const body = el("div", { class: "card-body" });
+  box.append(body);
+  let pollTimer = null;
+
+  const stopPolling = () => {
+    clearTimeout(pollTimer);
+    pollTimer = null;
+  };
+  const close = () => {
+    stopPolling();
+    box.remove();
+    onClose?.();
+  };
+  const closeButton = (text = "关闭") =>
+    el("button", { type: "button", class: "btn btn-sm btn-link", text, onclick: close });
+
+  // ---- 阶段 1：填表 ------------------------------------------------------
+  function renderForm(error = null) {
+    stopPolling();
+    const nameInput = el("input", {
+      class: "form-control mono",
+      value: name || suggestAuthName(url),
+      placeholder: "shop-test9-admin",
+      readonly: overwrite,
+    });
+    const urlInput = el("input", { class: "form-control", type: "url", value: url, placeholder: "https://…" });
+    const openButton = el("button", {
+      type: "button",
+      class: "btn btn-primary",
+      text: overwrite ? "打开浏览器重新登录" : "打开浏览器登录",
+    });
+    const uploadLink = el("button", {
+      type: "button",
+      class: "btn btn-sm btn-link",
+      text: "弹不出窗口？改为上传 storageState",
+      onclick: () => renderUpload(nameInput.value.trim(), urlInput.value.trim()),
+    });
+
+    const submit = async (force) => {
+      name = nameInput.value.trim();
+      url = urlInput.value.trim();
+      openButton.disabled = true;
+      try {
+        const status = await call("/api/auth-window", { method: "POST", body: { name, url, overwrite: overwrite || force } });
+        renderWaiting(status);
+      } catch (err) {
+        openButton.disabled = false;
+        if (err.status === 409 && err.detail?.exists) {
+          // 名字撞了：问一句要不要覆盖，而不是让人自己想办法改名
+          if (confirm(`登录态 ${name} 已存在。要重新登录并覆盖它吗？`)) await submit(true);
+          return;
+        }
+        if (err.status === 409 && err.detail?.window) {
+          renderBusy(err.detail.window);
+          return;
+        }
+        renderForm(err);
+      }
+    };
+    openButton.addEventListener("click", () => void submit(false));
+
+    setChildren(body, [
+      el("div", { class: "login-flow-head" }, [
+        el("h3", { class: "h6 mb-0", text: overwrite ? `重新登录 ${name}` : "新建登录态" }),
+        closeButton(),
+      ]),
+      error === null ? null : errorBox(error),
+      el("div", { class: "row g-2" }, [
+        el("label", { class: "col-md-4" }, [
+          el("span", { class: "form-label", text: "名称" }),
+          nameInput,
+        ]),
+        el("label", { class: "col-md-8" }, [
+          el("span", { class: "form-label", text: "登录地址（打开后就是要登录的页面，通常填用例的起始地址）" }),
+          urlInput,
+        ]),
+      ]),
+      hint(
+        overwrite
+          ? "会在你的桌面上弹出一个浏览器窗口。在里面重新登录，回到这里点保存，旧的登录态会被替换。"
+          : "名称用小写字母、数字和连字符，用例里按名称引用它；同一站点的不同账号请各建一份（如 **shop-admin**、**shop-viewer**）。",
+      ),
+      el("div", { class: "login-flow-actions" }, [openButton, overwrite ? null : uploadLink]),
+    ]);
+    // 名字是推出来的建议值时，改地址要跟着改建议——但人手动改过名字之后就不再动它
+    let nameTouched = name !== "";
+    nameInput.addEventListener("input", () => {
+      nameTouched = true;
+    });
+    urlInput.addEventListener("input", () => {
+      if (!nameTouched && !overwrite) nameInput.value = suggestAuthName(urlInput.value.trim());
+    });
+  }
+
+  // ---- 已有别的窗口开着 --------------------------------------------------
+  function renderBusy(status) {
+    setChildren(body, [
+      el("div", { class: "login-flow-head" }, [el("h3", { class: "h6 mb-0", text: "已有一个登录窗口开着" }), closeButton()]),
+      hint(`登录态 **${status.name}** 的窗口还开着。同一时刻只开一个窗口，免得分不清哪个窗口对应哪一份。`),
+      el("div", { class: "login-flow-actions" }, [
+        el("button", {
+          type: "button",
+          class: "btn btn-outline-primary",
+          text: `继续那一个（${status.name}）`,
+          onclick: () => {
+            name = status.name;
+            url = status.url;
+            renderWaiting(status);
+          },
+        }),
+        el("button", {
+          type: "button",
+          class: "btn btn-outline-secondary",
+          text: "关掉它，开我这个",
+          onclick: async () => {
+            await call("/api/auth-window/cancel", { method: "POST" });
+            renderForm();
+          },
+        }),
+      ]),
+    ]);
+  }
+
+  // ---- 阶段 2：等人登录 --------------------------------------------------
+  function renderWaiting(status) {
+    const where = el("p", { class: "login-flow-where mono" });
+    const saveButton = el("button", { type: "button", class: "btn btn-primary", text: "✓ 已登录，保存登录态" });
+    const cancelButton = el("button", { type: "button", class: "btn btn-outline-secondary", text: "取消" });
+    const errorSlot = el("div");
+
+    const showWhere = (current) => {
+      where.textContent = current.currentUrl ? `窗口当前页面：${current.currentUrl}` : "";
+    };
+    showWhere(status);
+
+    saveButton.addEventListener("click", async () => {
+      saveButton.disabled = true;
+      cancelButton.disabled = true;
+      try {
+        const summary = await call("/api/auth-window/save", { method: "POST" });
+        renderSaved(summary);
+      } catch (err) {
+        saveButton.disabled = false;
+        cancelButton.disabled = false;
+        errorSlot.replaceChildren(errorBox(err));
+      }
+    });
+    cancelButton.addEventListener("click", async () => {
+      stopPolling();
+      await call("/api/auth-window/cancel", { method: "POST" }).catch(() => null);
+      close();
+    });
+
+    setChildren(body, [
+      el("div", { class: "login-flow-head" }, [
+        el("h3", { class: "h6 mb-0", text: `正在登录 ${status.name}` }),
+        el("span", { class: "login-flow-live", text: "等待你完成登录" }),
+      ]),
+      el("ol", { class: "login-flow-steps" }, [
+        el("li", { text: "已在你的桌面上弹出一个浏览器窗口（没看到的话，看看是不是在别的窗口后面）。" }),
+        el("li", { text: "在那个窗口里正常登录：账号密码、扫码、验证码都可以，登录几步都行。" }),
+        el("li", { text: "看到登录后的页面了，回到这里点「保存」。窗口会自动关闭。" }),
+      ]),
+      where,
+      errorSlot,
+      el("div", { class: "login-flow-actions" }, [saveButton, cancelButton]),
+    ]);
+
+    // 轮询窗口状态：人直接关掉窗口（或超时）时及时告诉他，而不是让「保存」按钮一直亮着
+    const poll = async () => {
+      if (!box.isConnected) return stopPolling();
+      try {
+        const current = await call("/api/auth-window");
+        if (current === null) return; // 已保存或已取消（可能是另一个标签页里点的）
+        if (current.state === "closed") return renderClosed(current);
+        showWhere(current);
+      } catch {
+        // 一次轮询失败不打断流程：服务可能只是短暂不可达
+      }
+      pollTimer = setTimeout(poll, LOGIN_POLL_MS);
+    };
+    stopPolling();
+    pollTimer = setTimeout(poll, LOGIN_POLL_MS);
+  }
+
+  function renderClosed(status) {
+    stopPolling();
+    setChildren(body, [
+      el("div", { class: "login-flow-head" }, [el("h3", { class: "h6 mb-0", text: `登录 ${status.name} 没有完成` }), closeButton()]),
+      el("p", { class: "blocking", text: status.closedReason ?? "登录窗口已关闭，登录态没有保存" }),
+      el("div", { class: "login-flow-actions" }, [
+        el("button", {
+          type: "button",
+          class: "btn btn-primary",
+          text: "重新打开窗口",
+          onclick: async () => {
+            try {
+              renderWaiting(await call("/api/auth-window", { method: "POST", body: { name: status.name, url: status.url, overwrite: true } }));
+            } catch (err) {
+              renderForm(err);
+            }
+          },
+        }),
+      ]),
+    ]);
+  }
+
+  // ---- 阶段 3：已保存 ----------------------------------------------------
+  function renderSaved(summary) {
+    stopPolling();
+    const verifySlot = el("div", { class: "login-flow-verify" }, [el("span", { class: "hint", text: "正在验证这份登录态……" })]);
+    setChildren(body, [
+      el("div", { class: "login-flow-head" }, [
+        el("h3", { class: "h6 mb-0", text: `已保存登录态 ${summary.name}` }),
+        closeButton("完成"),
+      ]),
+      el("p", { text: `${summary.cookieCount} 个 cookie，覆盖 ${sitesText(summary.sites)}。` }),
+      verifySlot,
+      savedNext === null ? null : el("div", { class: "login-flow-next" }, [savedNext(summary)]),
+    ]);
+    onSaved?.(summary);
+    if (summary.loginUrl === null) {
+      verifySlot.replaceChildren(hint("没有登录地址，跳过自动验证。可以在登录态列表里手动验证。"));
+      return;
+    }
+    // 自动验证一次：用这份登录态无头打开登录地址，看是不是还会被踢回登录页
+    void call(`/api/auth-states/${summary.name}/verify`, { method: "POST", body: {} })
+      .then((result) => {
+        setChildren(verifySlot, [
+          el("div", { class: "verify-line" }, [verifyBadge(result), el("span", { text: result.detail })]),
+          result.ok ? null : hint("如果你确认刚才已经登录成功，可能是站点把登录态绑在了别的东西上（如 IP、设备指纹）。可以先跑一次用例看结果。"),
+        ]);
+      })
+      .catch((err) => verifySlot.replaceChildren(errorBox(err)));
+  }
+
+  // ---- 兜底：上传 storageState -------------------------------------------
+  function renderUpload(presetName, presetUrl) {
+    stopPolling();
+    const nameInput = el("input", { class: "form-control mono", value: presetName, placeholder: "shop-test9-admin" });
+    const urlInput = el("input", { class: "form-control", type: "url", value: presetUrl, placeholder: "可选：用于验证" });
+    const fileInput = el("input", { class: "form-control", type: "file", accept: ".json,application/json" });
+    const textInput = el("textarea", { class: "form-control font-monospace", rows: 6, placeholder: '{ "cookies": [...], "origins": [...] }' });
+    const errorSlot = el("div");
+    const submitButton = el("button", { type: "button", class: "btn btn-primary", text: "上传" });
+
+    fileInput.addEventListener("change", async () => {
+      const file = fileInput.files?.[0];
+      if (file) textInput.value = await file.text();
+    });
+
+    const submit = async (force) => {
+      submitButton.disabled = true;
+      try {
+        const summary = await call("/api/auth-states", {
+          method: "POST",
+          body: { name: nameInput.value.trim(), state: textInput.value, loginUrl: urlInput.value.trim(), overwrite: force },
+        });
+        renderSaved(summary);
+      } catch (err) {
+        submitButton.disabled = false;
+        if (err.status === 409 && err.detail?.exists) {
+          if (confirm(`登录态 ${nameInput.value.trim()} 已存在。要用上传的内容覆盖它吗？`)) await submit(true);
+          return;
+        }
+        errorSlot.replaceChildren(errorBox(err));
+      }
+    };
+    submitButton.addEventListener("click", () => void submit(false));
+
+    setChildren(body, [
+      el("div", { class: "login-flow-head" }, [el("h3", { class: "h6 mb-0", text: "上传登录态" }), closeButton()]),
+      hint(
+        "给弹不出浏览器窗口的环境用。在一台有界面的机器上登录并导出 Playwright 的 storageState，" +
+          "例如 **npx playwright codegen --save-storage=state.json <登录地址>**，登录后关掉窗口，再把 state.json 传上来。",
+      ),
+      errorSlot,
+      el("div", { class: "row g-2" }, [
+        el("label", { class: "col-md-4" }, [el("span", { class: "form-label", text: "名称" }), nameInput]),
+        el("label", { class: "col-md-8" }, [el("span", { class: "form-label", text: "登录地址" }), urlInput]),
+      ]),
+      el("label", { class: "d-block mt-2" }, [el("span", { class: "form-label", text: "选文件，或直接粘贴 JSON" }), fileInput]),
+      textInput,
+      el("div", { class: "login-flow-actions" }, [
+        submitButton,
+        el("button", { type: "button", class: "btn btn-sm btn-link", text: "返回弹窗登录", onclick: () => renderForm() }),
+      ]),
+    ]);
+  }
+
+  if (resume !== null) {
+    name = resume.name;
+    url = resume.url;
+    if (resume.state === "closed") renderClosed(resume);
+    else renderWaiting(resume);
+  } else {
+    renderForm();
+  }
+  return box;
+}
+
+// ---------------------------------------------------------------------------
+// 视图：登录态
+// ---------------------------------------------------------------------------
+
+async function viewAuthStates(app, params) {
+  const [states, openWindow, cases] = await Promise.all([
+    call("/api/auth-states"),
+    call("/api/auth-window"),
+    call("/api/cases").catch(() => []),
+  ]);
+  const flowSlot = el("div");
+  const listSlot = el("div");
+
+  const refresh = async () => {
+    renderList(await call("/api/auth-states"));
+  };
+
+  // 从某个用例的结果页跳过来的：存完之后直接给「用到这个用例」
+  const forCase = params.get("case");
+  const forCaseTitle = forCase ? await call(`/api/cases/${forCase}`).then((c) => c.def.title).catch(() => forCase) : null;
+
+  const openFlow = (options) => {
+    flowSlot.replaceChildren(
+      loginFlow({
+        ...options,
+        onSaved: () => void refresh(),
+        onClose: () => flowSlot.replaceChildren(),
+        savedNext: forCase
+          ? (summary) => applyToCaseButton(forCase, forCaseTitle, summary.name)
+          : () => hint("接下来：打开要用它的用例，在「登录态」里选上它并**保存用例**。"),
+      }),
+    );
+    flowSlot.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
+
+  const newButton = el("button", {
+    type: "button",
+    class: "btn btn-primary",
+    text: "+ 新建登录态",
+    onclick: () => openFlow({ url: "" }),
+  });
+
+  app.replaceChildren(
+    pageHead("登录态", [newButton]),
+    hint(
+      "目标页面需要登录时，在这里登录一次，把登录后的 cookie 存成一份「登录态」，再在用例里选上它。" +
+        "**密码不经过模型，也不写进用例**；运行时只读载入，不会被改写。登录过期了就点「重新登录」。",
+    ),
+    flowSlot,
+    listSlot,
+  );
+  renderList(states);
+
+  // 从别处带着意图跳过来（结果页的「配置登录态」、编辑器的链接），或者有个窗口还开着
+  if (openWindow !== null) openFlow({ resume: openWindow });
+  else if (params.get("relogin")) {
+    const target = states.find((item) => item.name === params.get("relogin"));
+    openFlow({ name: params.get("relogin"), url: target?.loginUrl ?? params.get("url") ?? "", overwrite: target !== undefined });
+  } else if (params.get("new")) openFlow({ url: params.get("url") ?? "", name: params.get("name") ?? "" });
+
+  function renderList(items) {
+    if (items.length === 0) {
+      listSlot.replaceChildren(
+        emptyState({
+          icon: ICON_KEY,
+          title: "还没有登录态",
+          children: [hint("被测页面不需要登录的话，用不到这一页。需要的话点右上角「新建登录态」。")],
+        }),
+      );
+      return;
+    }
+    listSlot.replaceChildren(
+      el("div", { class: "table-responsive" }, [
+        el("table", { class: "table align-middle list-table auth-table" }, [
+          el("thead", {}, [
+            el("tr", {}, [
+              el("th", { text: "名称" }),
+              el("th", { text: "覆盖站点" }),
+              el("th", { text: "保存于" }),
+              el("th", { text: "状态" }),
+              el("th", { text: "引用用例" }),
+              el("th", { text: "" }),
+            ]),
+          ]),
+          el("tbody", {}, items.map(row)),
+        ]),
+      ]),
+    );
+  }
+
+  /**
+   * 站点对得上、却还没选任何登录态的用例：在这里就能用上。
+   * 建好登录态的人下一步几乎总是「给那个用例用上」，不该让他再去编辑器里找下拉框。
+   */
+  function usableBy(item) {
+    const targets = cases.filter((c) => c.authState === null && authCovers(item, c.startUrl));
+    if (targets.length === 0) return null;
+    return el("div", { class: "auth-usable" }, [
+      el("div", { class: "hint", text: "可用于（还没选登录态的）：" }),
+      ...targets.map((c) => el("div", {}, [applyToCaseButton(c.id, c.title, item.name, `用到「${c.title || c.id}」`)])),
+    ]);
+  }
+
+  function row(item) {
+    const statusCell = el("td");
+    const renderStatus = (verified) => {
+      setChildren(statusCell, [
+        verifyBadge(verified),
+        verified ? el("div", { class: "hint", text: `${verified.detail}（${relativeTime(verified.at)}）` }) : null,
+      ]);
+    };
+    renderStatus(item.lastVerified);
+
+    const verifyButton = el("button", { type: "button", class: "btn btn-sm btn-outline-secondary", text: "验证" });
+    verifyButton.title = "用这份登录态无头打开登录地址，看是否还是登录状态。不调用模型。";
+    verifyButton.disabled = item.loginUrl === null;
+    verifyButton.addEventListener("click", async () => {
+      verifyButton.disabled = true;
+      verifyButton.textContent = "验证中…";
+      try {
+        renderStatus(await call(`/api/auth-states/${item.name}/verify`, { method: "POST", body: {} }));
+      } catch (err) {
+        statusCell.replaceChildren(errorBox(err));
+      } finally {
+        verifyButton.disabled = false;
+        verifyButton.textContent = "验证";
+      }
+    });
+
+    const deleteButton = el("button", { type: "button", class: "btn btn-sm btn-outline-danger", text: "删除" });
+    deleteButton.addEventListener("click", async () => {
+      const users = item.usedBy.map((use) => use.title || use.id).join("、");
+      const question = item.usedBy.length > 0
+        ? `登录态 ${item.name} 仍被 ${item.usedBy.length} 个用例引用（${users}），删除后它们会运行失败。仍要删除吗？`
+        : `删除登录态 ${item.name}？`;
+      if (!confirm(question)) return;
+      try {
+        await call(`/api/auth-states/${item.name}${item.usedBy.length > 0 ? "?force=1" : ""}`, { method: "DELETE" });
+        await refresh();
+      } catch (err) {
+        flowSlot.replaceChildren(errorBox(err));
+      }
+    });
+
+    return el("tr", {}, [
+      el("td", {}, [
+        el("div", { class: "mono", text: item.name }),
+        el("div", { class: "hint", text: item.source === "import" ? "上传" : item.loginUrl ?? "" }),
+      ]),
+      el("td", { text: sitesText(item.sites) }),
+      el("td", {}, [
+        el("div", { text: relativeTime(item.savedAt) }),
+        item.earliestExpiry
+          ? el("div", {
+              class: "hint",
+              text: `最早的 cookie ${new Date(item.earliestExpiry).toLocaleString()} 过期`,
+              title: "只是参考：站点未必靠这一个 cookie 判断登录。是否有效以「验证」为准。",
+            })
+          : null,
+      ]),
+      statusCell,
+      el("td", {}, [
+        ...(item.usedBy.length === 0
+          ? [el("span", { class: "hint", text: "无" })]
+          : item.usedBy.map((use) => el("div", {}, [el("a", { href: `#/case/${use.id}`, text: use.title || use.id })]))),
+        usableBy(item),
+      ]),
+      el("td", {}, [
+        el("div", { class: "auth-actions" }, [
+          verifyButton,
+          el("button", {
+            type: "button",
+            class: "btn btn-sm btn-outline-primary",
+            text: "重新登录",
+            onclick: () => openFlow({ name: item.name, url: item.loginUrl ?? "", overwrite: true }),
+          }),
+          deleteButton,
+        ]),
+      ]),
+    ]);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -2050,6 +2896,82 @@ function refreshEventPlaceholder(list, report) {
   );
 }
 
+/**
+ * 第 0 步就因为域名白名单结束，且拦下的是一个 URL（不是某个动作）。
+ * 白名单越界时护栏把当时的 URL 记在 `action` 里（见 core/agent.ts 的 originAllowed）。
+ */
+function looksLikeLoginRedirect(report) {
+  if (report.status !== "guardrail_blocked" || report.steps.length !== 0) return false;
+  const hit = report.guardrailHits[0];
+  return hit !== undefined && hit.step === 0 && /^https?:\/\//.test(hit.action);
+}
+
+/**
+ * 被跳到登录页之后，按**实际情况**给下一步，而不是一段泛泛的说明：
+ *   - 这次运行用的用例版本带了登录态 -> 它多半过期了，重新登录；
+ *   - 没带，但已经有登录态覆盖这个站点 -> 八成是建好了却没用到用例上，一键用上；
+ *   - 一份都没有 -> 去新建（带着用例 id，建完直接用上）。
+ * 第一条要看的是**这一次运行**带没带登录态，不是现在的用例（运行之后用例可能改过）。
+ * 报告里没有单独的字段，但失败原因是 agent 按那次运行的用例写的
+ * （core/guard.ts 的 loginRedirectHint：「用例已带登录态 X」），从那里读。
+ */
+async function loginGuide(report) {
+  const [states, loaded] = await Promise.all([
+    call("/api/auth-states").catch(() => []),
+    call(`/api/cases/${report.caseId}`).catch(() => null),
+  ]);
+  const ran = /用例已带登录态 ([a-z0-9][a-z0-9-]*)/.exec(report.failureReason ?? "")?.[1];
+  const current = loaded?.def.authState;
+  const newLink = el("a", {
+    class: "btn btn-sm btn-outline-primary",
+    href: `#/auth?new=1&url=${encodeURIComponent(report.startUrl)}&case=${encodeURIComponent(report.caseId)}`,
+    text: "新建登录态",
+  });
+
+  if (ran) {
+    return [
+      el("span", { text: ` 这次运行带着登录态 ${ran}，打开仍被跳走，多半是它过期了。` }),
+      el("div", { class: "login-flow-actions" }, [
+        el("a", { class: "btn btn-sm btn-primary", href: `#/auth?relogin=${encodeURIComponent(ran)}`, text: `重新登录 ${ran}` }),
+      ]),
+    ];
+  }
+  if (current && loaded !== null) {
+    // 用例在这次运行之后已经配上了登录态：再跑一次就行
+    return [
+      el("span", { text: ` 这次运行时用例还没有登录态；它现在已经选上了 ${current}。` }),
+      el("div", { class: "login-flow-actions" }, [
+        el("button", {
+          type: "button",
+          class: "btn btn-sm btn-primary",
+          text: "重新运行",
+          onclick: () => runCaseAndOpen(report.caseId),
+        }),
+      ]),
+    ];
+  }
+  const candidates = rankCandidates(states, report.startUrl);
+  if (candidates.length > 0 && loaded !== null) {
+    return [
+      el("span", {
+        text: ` 已经有覆盖这个站点的登录态，但用例没有选它——登录态要在用例里选上并保存，运行才会带上。`,
+      }),
+      el("div", { class: "auth-candidates" }, candidates.map((state) =>
+        el("div", { class: "verify-line" }, [
+          applyToCaseButton(report.caseId, loaded.def.title, state.name, `用 ${state.name} 并保存用例`),
+          verifyBadge(state.lastVerified),
+          el("span", { class: "hint", text: `登录于 ${state.loginUrl ?? "（上传）"}・${relativeTime(state.savedAt)}` }),
+        ]),
+      )),
+      el("div", { class: "login-flow-actions" }, [newLink]),
+    ];
+  }
+  return [
+    el("span", { text: " 在弹出的浏览器里登录一次，存成登录态，再用到这个用例上。" }),
+    el("div", { class: "login-flow-actions" }, [newLink]),
+  ];
+}
+
 function reportHeader(report) {
   const stats = report.stats;
   const wrap = el("div", { class: `card verdict-card ${verdictClass(report.status, report.passed)}` });
@@ -2077,6 +2999,14 @@ function reportHeader(report) {
     }),
   );
   if (report.failureReason) body.append(el("p", { class: "blocking", text: report.failureReason }));
+  if (looksLikeLoginRedirect(report)) {
+    // 一打开就被跳出白名单：多半要登录。把下一步做成按钮，而不是让人自己读懂那段原因
+    const guide = el("div", { class: "alert alert-info login-redirect" }, [
+      el("strong", { text: "看起来目标页要求登录。" }),
+    ]);
+    body.append(guide);
+    void loginGuide(report).then((children) => guide.append(...children));
+  }
   if (report.artifacts.traceZip) {
     body.append(
       el("p", {}, [
@@ -2393,7 +3323,8 @@ function setActiveNav(head) {
     head === "" || head === "cases" || head === "case" ? "cases"
       : head === "runs" || head === "run" ? "runs"
         : head === "new" || head === "case-new-form" ? "new"
-          : null;
+          : head === "auth" ? "auth"
+            : null;
   for (const link of document.querySelectorAll("#nav a")) {
     if (link.dataset.nav === key) link.setAttribute("aria-current", "page");
     else link.removeAttribute("aria-current");
@@ -2430,7 +3361,10 @@ async function route() {
   const app = slot;
   clearTimeout(pollTimer);
   const hash = target.replace(/^#\/?/, "");
-  const [head, id] = hash.split("/");
+  // 查询串只给「带着意图跳转」用（如结果页 -> 登录态页并预填地址）。先切掉它，
+  // 否则地址里的斜杠会被当成路径段。
+  const [pathPart, query = ""] = hash.split("?");
+  const [head, id] = pathPart.split("/");
   setActiveNav(head);
 
   try {
@@ -2441,6 +3375,7 @@ async function route() {
     else if (head === "new") viewNew(app);
     else if (head === "runs") await viewRuns(app);
     else if (head === "run" && id) await viewRun(app, id);
+    else if (head === "auth") await viewAuthStates(app, new URLSearchParams(query));
     else app.replaceChildren(pageHead("未知路由"), el("p", { text: `#/${hash}` }));
   } catch (error) {
     if (slot.isConnected) app.replaceChildren(pageHead("出错了"), errorBox(error));

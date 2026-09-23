@@ -22,11 +22,32 @@
 | `startUrl` | string (URL) | **是** | — | 起始地址 |
 | `mode` | `interactive` \| `readonly` | 否 | `interactive` | 见下方 |
 | `allowedOrigins` | string[] | 否 | `[startUrl 的 origin]` | 域名白名单 |
+| `authState` | string | 否 | （无：未登录的全新浏览器） | 登录态的**名字**，见下方 |
 | `budget` | object | 否 | 见下方 | 成本与规模上限 |
 | `guardrails` | Guardrail[] | 否 | `[]` | 追加在**内置默认集之上** |
 | `allowDefaultOverride` | boolean | 否 | `false` | 是否允许移除内置护栏。慎用 |
 | `engine` | string | 否 | `settings.defaultEngine` | 决策引擎名 |
 | `assertions` | object | 否 | `{}` | 三层断言，见下方 |
+
+### 关于 `authState`
+
+目标页面需要登录时用它。值是 Web「登录态」页里的一份登录态的**名字**，不是文件路径——
+运行时解析成 `<JEVTEST_AUTH_DIR>/<名字>.json`，载入其中的 cookie 与 localStorage 后再打开 `startUrl`。
+名字规则与 `id` 相同（小写字母、数字、连字符，2~64 位）。
+
+- **只收名字**：用例可以从 Web 端创建，收路径就等于允许用例指向本机任意文件。
+- **只读载入**：运行中的登出、会话轮换不会写回文件，多个用例共用一份互不影响。
+- **不要把账号密码写进 `goal`**：goal 会发给模型厂商、进报告。登录由人在弹出的浏览器里完成一次，
+  密码从不经过本平台。
+- **不要为了登录放宽 `allowedOrigins`**：没有登录态时站点会把你重定向到登录页 / SSO 域，
+  白名单拦下它是对的。该做的是配登录态。
+- 引用的登录态不存在时，运行以 `error` 结束并提示去登录；登录态过期时，运行通常在第 0 步以
+  `guardrail_blocked` 结束，失败原因会提示重新登录。
+
+```yaml
+startUrl: https://shop_test9.example.com/products
+authState: shop-test9-admin
+```
 
 ### 关于 `goal`
 
@@ -258,7 +279,7 @@ assertions:
 | `queued` | 已入队 |
 | `running` | 执行中 |
 | `done` | 模型选择了 DONE，且页面在决策后未变化 |
-| `blocked` | 模型选择了 BLOCKED，或连续多步无进展 |
+| `blocked` | 模型选择了 BLOCKED（概率须过半，见 decisions.md D20），或连续多步无进展，或连续 3 次决策在执行前被丢弃（目标被遮挡 / 页面已变，见 D21） |
 | `budget_exceeded` | 撞到预算上限 |
 | `guardrail_blocked` | 被安全护栏拦截 |
 | `cancelled` | 用户取消 |

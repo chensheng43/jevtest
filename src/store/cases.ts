@@ -61,6 +61,9 @@ export interface CaseSummary {
   revision: number;
   digest: string;
   savedAt: string;
+  startUrl: string;
+  /** 用例选的登录态名字；没选为 `null`。列表页据此在「运行」前提醒没带登录态 */
+  authState: string | null;
   /** 最近一次运行的结论。从 `runs/index.jsonl` 反查；从未跑过为 `null` */
   lastRun: { runId: string; status: RunStatus; passed: boolean | null; startedAt: string } | null;
 }
@@ -468,6 +471,8 @@ export function createCaseStore(options: CaseStoreOptions): CaseStore {
           // digest 取自「默认值已填充的完整 Case」，见文件末尾的实现说明
           digest: caseDigest(stored.parsed),
           savedAt: stored.savedAt,
+          startUrl: stored.parsed.startUrl,
+          authState: stored.parsed.authState ?? null,
           lastRun:
             run === undefined
               ? null

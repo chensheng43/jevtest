@@ -6,6 +6,9 @@ dist/
 .env
 .env.local
 
+# 登录态：storageState 里是真实会话 cookie，绝不入库
+auth/
+
 # 运行产物（报告、截图、trace）
 runs/
 *.log

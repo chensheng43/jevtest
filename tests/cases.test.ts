@@ -868,6 +868,14 @@ describe("list", () => {
     assert.equal(summary.digest, loaded.revision.digest);
     assert.equal(summary.savedAt, loaded.revision.savedAt);
     assert.equal(summary.lastRun, null); // 从没跑过
+    assert.equal(summary.startUrl, loaded.def.startUrl);
+    assert.equal(summary.authState, null); // 没选登录态是 null，不是缺字段
+  });
+
+  it("列表带出 authState：列表页据此在「运行」前提醒没带登录态", async (t) => {
+    const lib = await makeLibrary(t);
+    await lib.store.write({ ...definition({ id: "flights" }), authState: "admin-login" });
+    assert.equal((await lib.store.list())[0]?.authState, "admin-login");
   });
 
   it("非用例目录与坏用例被跳过，其余照常列出", async (t) => {

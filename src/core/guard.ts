@@ -434,3 +434,17 @@ const MUTATING_KINDS: readonly string[] = MUTATING_OPERATIONS.flatMap((operation
   const kind = OPERATION_TO_KIND[operation];
   return kind === undefined ? [] : [kind];
 });
+
+/**
+ * 打开 startUrl 就跳出白名单时的补充说明。
+ *
+ * 第 0 步就越界，最常见的原因是「目标页要求登录，被重定向到了登录页 / SSO」。
+ * 这时白名单拦得是对的，但只说「越界了」用户不知道下一步该做什么——
+ * 该做的是配登录态（或重新登录），而不是去放宽白名单。
+ */
+export function loginRedirectHint(authState: string | undefined): string {
+  return authState === undefined
+    ? "一打开就被跳走，多半是目标页要求登录：到「登录态」页登录一次，再在用例里选上这份登录态；" +
+        "不要为此放宽白名单"
+    : `用例已带登录态 ${authState}，一打开仍被跳走，多半是它已过期：到「登录态」页重新登录 ${authState}`;
+}

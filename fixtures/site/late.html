@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>晚到的列表</title>
+  </head>
+  <body>
+    <h1>产品采集</h1>
+    <!-- 后台管理类单页应用的常见形状：DOMContentLoaded 时只有外壳，按钮随后一次 XHR 才拉回来 -->
+    <div id="list"></div>
+    <script>
+      fetch("late.json?delay=800")
+        .then((response) => response.json())
+        .then((data) => {
+          for (const label of data.items) {
+            const button = document.createElement("button");
+            button.type = "button";
+            button.textContent = label;
+            document.getElementById("list").append(button);
+          }
+        });
+    </script>
+  </body>
+</html>

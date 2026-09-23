@@ -31,7 +31,7 @@ import {
   resolveVendorPath,
 } from "./security.ts";
 import type { SecurityContext } from "./security.ts";
-import { configureApi, handle } from "./api.ts";
+import { AUTH_UPLOAD_MAX_BYTES, configureApi, handle } from "./api.ts";
 import type { ApiResponse, Services } from "./api.ts";
 
 export interface ServerDeps {
@@ -115,7 +115,7 @@ export function createServer(deps: ServerDeps): Server {
     // ---- 读请求体（流式限长） ---------------------------------------------
     let body: unknown;
     if (isWrite) {
-      const read = await readBody(req, res);
+      const read = await readBody(req, res, bodyLimitFor(method, url.pathname));
       if (read === null) return; // 已回 413 或 400
       body = read;
     }
@@ -223,6 +223,8 @@ export function createServer(deps: ServerDeps): Server {
       // 顺序不能反：先让在途用例走到步边界并写完报告，再断连接。
       // 反过来会出现「用例跑完了却没法把报告响应给任何人」。
       await deps.services.runner.stop();
+      // 登录窗口是单独起的有界面浏览器，不在池里，要单独关，否则停机后桌面上还留着一个窗口。
+      await deps.services.login.stop();
       await new Promise<void>((resolvePromise, rejectPromise) => {
         server.close((error) => (error ? rejectPromise(error) : resolvePromise()));
         // keep-alive 连接会让 close() 一直不回调。轮询端点尤其容易留下这种连接。
@@ -257,7 +259,15 @@ function safeDecode(pathname: string): string {
  * **不能先收完再判断大小**——那样对方只要发一个巨大的 body 就能把内存塞爆，
  * 而限制本身形同虚设。这里一边收一边数，超了立刻回 413 并断开。
  */
-async function readBody(req: IncomingMessage, res: ServerResponse): Promise<unknown | null> {
+/**
+ * 请求体上限。只有「上传登录态」一个端点放宽：一份 storageState 动辄几十 KB，
+ * 其余控制类端点仍是 8KB。按精确的方法 + 路径放行，不按前缀——前缀会顺带放宽别的端点。
+ */
+function bodyLimitFor(method: string, pathname: string): number {
+  return method === "POST" && pathname === "/api/auth-states" ? AUTH_UPLOAD_MAX_BYTES : MAX_BODY_BYTES;
+}
+
+async function readBody(req: IncomingMessage, res: ServerResponse, limit: number): Promise<unknown | null> {
   const chunks: Buffer[] = [];
   let total = 0;
   let exceeded = false;
@@ -265,7 +275,7 @@ async function readBody(req: IncomingMessage, res: ServerResponse): Promise<unkn
   for await (const chunk of req) {
     const buffer = chunk as Buffer;
     total += buffer.length;
-    if (total > MAX_BODY_BYTES) {
+    if (total > limit) {
       exceeded = true;
       break;
     }
@@ -273,7 +283,7 @@ async function readBody(req: IncomingMessage, res: ServerResponse): Promise<unkn
   }
 
   if (exceeded) {
-    writeJson(res, 413, { error: `请求体超过 ${MAX_BODY_BYTES} 字节上限` });
+    writeJson(res, 413, { error: `请求体超过 ${limit} 字节上限` });
     req.destroy();
     return null;
   }

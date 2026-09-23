@@ -18,12 +18,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { CaseAgent, DEFAULT_NO_PROGRESS_LIMIT } from "../src/core/agent.ts";
+import { CaseAgent, DEFAULT_NO_PROGRESS_LIMIT, MAX_CONSECUTIVE_DISCARDS } from "../src/core/agent.ts";
+import { MAX_WEAK_BLOCKED_OVERRIDES } from "../src/core/policy.ts";
 import { createBudgetMeter } from "../src/core/budget.ts";
-import { InputInterrupted, StalePage } from "../src/core/errors.ts";
+import { InputInterrupted, OccludedTarget, StalePage } from "../src/core/errors.ts";
 import { createScriptedEngine, constantSteps } from "../src/engine/scripted.ts";
 import type { ScriptedStep } from "../src/engine/scripted.ts";
-import type { DecisionEngine } from "../src/engine/types.ts";
+import type { Answer, DecisionEngine } from "../src/engine/types.ts";
 import { attachFailedCallUsage } from "../src/engine/types.ts";
 import { CaseDefinitionSchema } from "../src/schema/case.ts";
 import type { Case, CaseDefinition } from "../src/schema/case.ts";
@@ -230,6 +231,51 @@ test("act 抛 StalePage（输入前的新鲜度复查）时：决策作废、重
   assert.match(skipped.reason, /未执行|未收到任何输入/);
   // 起始页由 goto 给出（不计入 observeCalls），所以「重新观测一次」就是 1。
   assert.equal(session.observeCalls, 1, "作废之后必须重新观测一次");
+});
+
+test("连续丢弃达到上限判 blocked：点不到的目标不能无限重问模型", async () => {
+  // 这条来自一次真跑：弹窗里一个被滚动区裁掉的复选框，每次输入前都判 occluded。
+  // 丢弃的决策不产生 StepRecord（无进展检测看不到），模型也看不到上一次没点成，
+  // 于是同一个答案问了 16 次，直到 input token 预算耗尽。
+  const session = new FakeSession({
+    observations: [richPage()],
+    actError: new OccludedTarget("动作 e1（Home）在执行前变得不可用：元素中心点被别的元素盖住"),
+  });
+  const engine = createScriptedEngine({ steps: constantSteps(clickLink(), 20) });
+
+  const { report, events } = await runCase({ caseDef: makeCase(), session, engine });
+
+  assert.equal(report.status, "blocked");
+  assert.match(report.failureReason ?? "", new RegExp(`连续 ${MAX_CONSECUTIVE_DISCARDS} 次决策`));
+  assert.match(report.failureReason ?? "", /盖住/, "原因里要带上最近一次丢弃的理由，否则没法排查");
+  assert.equal(report.stats.decisions, MAX_CONSECUTIVE_DISCARDS, "到上限就停，不再多问一次");
+  assert.equal(session.actCount, MAX_CONSECUTIVE_DISCARDS);
+  assert.equal(report.steps.length, 0, "没有执行过的动作不能进轨迹");
+  assert.equal(eventsOf(events, "step.skipped").length, MAX_CONSECUTIVE_DISCARDS);
+});
+
+test("丢弃计数只算连续的：中间成功执行一步就清零", async () => {
+  // 每页指纹不同：页面一直在变，无进展检测不会先于被测的这道闸触发
+  const pages = Array.from({ length: 8 }, (_, i) => richPage({ fingerprint: `fp-${i}` }));
+  let acts = 0;
+  const session = new FakeSession({
+    observations: pages,
+    onAct: () => {
+      acts += 1;
+      // 每三次里前 MAX-1 次被拦：每一轮都差一次就到上限
+      if (acts % MAX_CONSECUTIVE_DISCARDS !== 0) throw new OccludedTarget("元素中心点被别的元素盖住");
+    },
+  });
+  const rounds = 2;
+  const engine = createScriptedEngine({
+    steps: [...constantSteps(clickLink(), MAX_CONSECUTIVE_DISCARDS * rounds), done()],
+  });
+
+  const { report, events } = await runCase({ caseDef: makeCase(), session, engine });
+
+  assert.equal(report.status, "done", "成功执行过就不是连续丢弃，不该判 blocked");
+  assert.equal(report.steps.length, rounds);
+  assert.equal(eventsOf(events, "step.skipped").length, (MAX_CONSECUTIVE_DISCARDS - 1) * rounds);
 });
 
 test("act 抛 InputInterrupted（输入发出途中失败）时：按已执行记录、绝不重来", async () => {
@@ -655,4 +701,74 @@ test("正常路径：degenerate 分布下概率类检查标 skipped -> 整体判
     "有检查被跳过而无失败 => 未判定。判 true 就是 D9 要杜绝的谎报覆盖",
   );
   assert.equal(report.passed, null);
+});
+
+// ---------------------------------------------------------------------------
+// BLOCKED 要过半才结束运行
+// ---------------------------------------------------------------------------
+
+/**
+ * 每次都「BLOCKED 0.45、CLICK 0.40、其余平分 0.15」的引擎——实测那次真跑的形状：
+ * 单项最大是 BLOCKED，但过半的概率认为还能动。各 target head 都选第一个候选。
+ */
+function hesitantBlockedEngine(): DecisionEngine {
+  const inner = createScriptedEngine({ steps: [] });
+  return {
+    ...inner,
+    async decide(req) {
+      const answers: Record<string, Answer> = {};
+      for (const question of req.questions) {
+        const ids = question.options.map((option) => option.id);
+        let probabilities: Record<string, number>;
+        if (question.key === "operation") {
+          const rest = ids.filter((id) => id !== "BLOCKED" && id !== "CLICK");
+          probabilities = Object.fromEntries(ids.map((id) => [id, 0.15 / rest.length]));
+          probabilities["BLOCKED"] = 0.45;
+          probabilities["CLICK"] = 0.4;
+        } else {
+          probabilities = Object.fromEntries(ids.map((id, index) => [id, index === 0 ? 1 : 0]));
+        }
+        const choice = question.key === "operation" ? "BLOCKED" : (ids[0] ?? "");
+        answers[question.key] = {
+          key: question.key,
+          choice,
+          probabilities,
+          distribution: "full",
+          confidence: probabilities[choice] ?? 0,
+        };
+      }
+      return {
+        answers,
+        usage: { inputTokens: 1, outputTokens: 1, costUsd: null, requests: 1 },
+        latencyMs: 1,
+        engine: "hesitant",
+        raw: null,
+      };
+    },
+  };
+}
+
+test("BLOCKED 没过半不结束运行：改走次高的 CLICK 并留痕；替换次数用完后照常接受 BLOCKED", async () => {
+  // 每次动作后页面都变：排除「无进展检测」的干扰，只看这道闸本身
+  const pages = Array.from({ length: 6 }, (_, index) =>
+    richPage({ fingerprint: `fp-${index}`, url: `https://example.test/p${index}` }),
+  );
+  const session = new FakeSession({ observations: pages });
+
+  const { report, events } = await runCase({ caseDef: makeCase(), session, engine: hesitantBlockedEngine() });
+
+  assert.equal(session.actCount, MAX_WEAK_BLOCKED_OVERRIDES, "每次替换都执行了一个真实动作");
+  assert.equal(report.steps.length, MAX_WEAK_BLOCKED_OVERRIDES);
+  for (const step of report.steps) {
+    assert.equal(step.operation, "CLICK");
+    assert.equal(step.operationProbability, 0.4, "记录的是 CLICK 自己的概率，而不是 BLOCKED 的");
+  }
+  assert.equal(report.status, "blocked", "次数用完后，没过半的 BLOCKED 也照常结束运行");
+
+  const warnings = events.filter(
+    (event) => event.type === "run.log" && event.level === "warn" && /没有过半/.test(event.message),
+  );
+  assert.equal(warnings.length, MAX_WEAK_BLOCKED_OVERRIDES, "每次替换都在事件里说明了原因");
+  const decided = eventsOf(events, "step.decided").map((event) => (event.type === "step.decided" ? event.operation : ""));
+  assert.deepEqual(decided, ["CLICK", "CLICK", "CLICK", "BLOCKED"], "step.decided 报的是实际走的操作");
 });

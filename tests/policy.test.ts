@@ -24,6 +24,7 @@ import {
   buildActionSpace,
   buildDecisionRequest,
   isTerminal,
+  overrideWeakBlocked,
   resolveDecision,
   targetQuestionKey,
 } from "../src/core/policy.ts";
@@ -699,3 +700,79 @@ function questionOf(space: ReturnType<typeof buildActionSpace>, key: string): Qu
   assert.ok(found !== undefined, `动作空间里没有 "${key}" 问题`);
   return found;
 }
+
+// ---------------------------------------------------------------------------
+// overrideWeakBlocked：BLOCKED 要过半才结束运行
+// ---------------------------------------------------------------------------
+
+/** click + 滚动 + 等待都在：operation 候选是 CLICK / SCROLL_UP / SCROLL_DOWN / WAIT / DONE / BLOCKED */
+function richSpace(): ReturnType<typeof buildActionSpace> {
+  return buildActionSpace([click(1, "批量导入产品库"), click(2, "导入设置"), SCROLL_UP, SCROLL_DOWN, WAIT], {
+    mode: "interactive",
+  });
+}
+
+function weakBlocked(blocked: number, rest: Record<string, number>, extra: Record<string, unknown> = {}): DecisionResult {
+  return decision({
+    operation: answer("operation", "BLOCKED", { BLOCKED: blocked, ...rest }, blocked),
+    click_target: answer("click_target", "2", { "1": 0.3, "2": 0.7 }, 0.7),
+    ...extra,
+  });
+}
+
+test("BLOCKED 没过半：改走概率最大的非终止操作，目标用该 head 自己的选择（实测那次：0.46 / 0.35）", () => {
+  const space = richSpace();
+  const result = weakBlocked(0.46, { CLICK: 0.35, SCROLL_UP: 0.02, SCROLL_DOWN: 0.15, WAIT: 0.01, DONE: 0.01 });
+  const decided = resolveDecision(space, result);
+  assert.equal(decided.operation, "BLOCKED");
+
+  const override = overrideWeakBlocked(space, result, decided);
+  assert.ok(override !== null);
+  assert.equal(override.operation, "CLICK");
+  assert.equal(override.target, "2");
+  assert.equal(override.action, space.targets["CLICK"]?.["2"], "动作必须是动作空间里那一个对象");
+  // 如实记录：这一步是在 0.35 的把握下走的，不是模型说的 0.46
+  assert.equal(override.operationProbability, 0.35);
+  assert.equal(override.confidence, 0.35);
+});
+
+test("BLOCKED 过半：照常结束，不替换", () => {
+  const space = richSpace();
+  const result = weakBlocked(0.58, { CLICK: 0.3, SCROLL_UP: 0.02, SCROLL_DOWN: 0.08, WAIT: 0.01, DONE: 0.01 });
+  assert.equal(overrideWeakBlocked(space, result, resolveDecision(space, result)), null);
+});
+
+test("非终止操作里最大的是页面级操作：改走它（没有目标）", () => {
+  const space = richSpace();
+  const result = weakBlocked(0.4, { CLICK: 0.1, SCROLL_UP: 0.05, SCROLL_DOWN: 0.3, WAIT: 0.14, DONE: 0.01 });
+  const override = overrideWeakBlocked(space, result, resolveDecision(space, result));
+  assert.equal(override?.operation, "SCROLL_DOWN");
+  assert.equal(override?.target, null);
+  assert.equal(override?.action, space.controls["SCROLL_DOWN"]);
+});
+
+test("DONE 不受影响：它的对错由断言判，不需要这道闸", () => {
+  const space = richSpace();
+  const result = decision({
+    operation: answer("operation", "DONE", { DONE: 0.4, CLICK: 0.35, SCROLL_UP: 0.05, SCROLL_DOWN: 0.1, WAIT: 0.05, BLOCKED: 0.05 }),
+  });
+  assert.equal(overrideWeakBlocked(space, result, resolveDecision(space, result)), null);
+});
+
+test("合成分布（degenerate）没有真概率可比：不替换", () => {
+  const space = richSpace();
+  const result = decision({ operation: answer("operation", "BLOCKED") });
+  const decided = resolveDecision(space, result);
+  assert.equal(decided.distribution, "degenerate");
+  assert.equal(overrideWeakBlocked(space, result, decided), null);
+});
+
+test("替换目标的 head 答坏了：不替换、也不让整步失败，照常接受 BLOCKED", () => {
+  const space = richSpace();
+  const result = weakBlocked(
+    0.46,
+    { CLICK: 0.35, SCROLL_UP: 0.02, SCROLL_DOWN: 0.15, WAIT: 0.01, DONE: 0.01 },
+    { click_target: { choice: "99" } },
+  );
+  assert.equal(overrideWeakBlocked(space, result, resolveDecision(space, result)), null);
+});

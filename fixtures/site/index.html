@@ -32,7 +32,7 @@
   <section aria-labelledby="trap-heading" id="traps">
     <h2 id="trap-heading">陷阱元素</h2>
     <p class="note">
-      这些按钮都不该被点到：观测时它们在候选集里，<strong>执行前</strong>那次几何重解析与命中测试必须把它们拦下来。
+      这些按钮都不该被点到：观测时就点不到的不进候选集；观测后才变的，<strong>执行前</strong>那次几何重解析与命中测试必须把它们拦下来。
     </p>
     <div class="trap-row">
       <button id="trap-mover" class="trap">观测后会移出视口的按钮</button>
@@ -41,10 +41,18 @@
         被浮层遮挡：它自己一切正常（尺寸、可见性、在视口内都成立），
         只有 elementFromPoint 能发现中心点被盖住了。
         这正是 locator.click() 会替我们做掉、而我们**必须自己做**的那一步（architecture §7.1）。
+        两个按钮各测一条路径：一直被盖住的在观测时就不进候选集；
+        浮层在陷阱生效时才出现的那个，观测时在候选集里，要靠输入前的命中测试拦下。
+        后者的浮层**必须没有文字**：守卫比较元素所在容器的 innerText，浮层带字的话，
+        它一出现就先被新鲜度复查判成 StalePage，命中测试根本轮不到。
       -->
       <span class="occlusion-box">
-        <button id="trap-occluded" class="trap">被浮层遮挡的按钮</button>
-        <span id="trap-overlay" aria-hidden="true">浮层</span>
+        <button id="trap-covered" class="trap">一直被浮层盖住的按钮</button>
+        <span class="trap-overlay" aria-hidden="true">浮层</span>
+      </span>
+      <span class="occlusion-box">
+        <button id="trap-occluded" class="trap">观测后会被浮层盖住的按钮</button>
+        <span id="trap-overlay" class="trap-overlay" aria-hidden="true" hidden></span>
       </span>
     </div>
     <!--

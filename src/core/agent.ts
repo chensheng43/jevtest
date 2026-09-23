@@ -45,9 +45,11 @@
  *   会以同一个 `step` 号重新观测、重新决策（它没产生 StepRecord），因此
  *   `step.decided` 可能对同一个 `step` 出现两次——这是 `step.skipped` 存在的意义。
  *
- * - **`step.skipped` 只在一处发出：陈旧决策被丢弃时**（终止决策的新鲜度复查、
- *   以及 TYPE_TEXT 输入前的新鲜度复查）。被护栏拦下的那一步另有 `guardrail.blocked`，
- *   它是一条 `StepRecord(executed: false)`，不是「跳过」。
+ * - **`step.skipped` 只在一处发出：`discardDecision`，即决策被丢弃时**（终止决策的
+ *   新鲜度复查、TYPE_TEXT 输入前的新鲜度复查、act 在输入前抛 StalePage / OccludedTarget）。
+ *   被护栏拦下的那一步另有 `guardrail.blocked`，它是一条 `StepRecord(executed: false)`，
+ *   不是「跳过」。连续丢弃 `MAX_CONSECUTIVE_DISCARDS` 次判 blocked——无进展检测只看
+ *   StepRecord，看不到这条路径上的空转。
  *
  * - **本文件不发 `run.started` / `run.finished`。** `run.started` 由 runner 发（它按
  *   用例构造引擎，知道实际用的是哪个）；`run.finished` 也只能由 runner 发——只有它
@@ -73,12 +75,14 @@ import type { Resolved } from "./policy.ts";
 
 import { GuardrailBlocked, InputInterrupted, OccludedTarget, StalePage } from "./errors.ts";
 import { admit } from "../browser/admission.ts";
-import { assertAllowedOrigin, checkAction } from "./guard.ts";
+import { assertAllowedOrigin, checkAction, loginRedirectHint } from "./guard.ts";
 import {
+  MAX_WEAK_BLOCKED_OVERRIDES,
   RECENT_ACTIONS,
   buildActionSpace,
   buildDecisionRequest,
   isTerminal,
+  overrideWeakBlocked,
   resolveDecision,
 } from "./policy.ts";
 import { buildTextRequest, textContextKey } from "../engine/text.ts";
@@ -87,6 +91,15 @@ import { buildReport } from "./report.ts";
 
 /** 连续多少步无进展判为 blocked。用例可用 trajectory.maxIdenticalConsecutive 覆盖。 */
 export const DEFAULT_NO_PROGRESS_LIMIT = 3;
+
+/**
+ * 连续多少次决策在执行前被丢弃（陈旧 / 目标不可用）判为 blocked。
+ *
+ * 丢弃的决策不产生 StepRecord，所以无进展检测看不到它们；而模型也看不到上一次
+ * 没点成（请求里只有执行过的动作），页面没变时它会给出同一个答案。
+ * 没有这道闸，一个点不到的目标会一直问到预算耗尽——每问一次都是一次完整的模型调用。
+ */
+export const MAX_CONSECUTIVE_DISCARDS = 3;
 
 /** 在等模型响应时被取消。runner 会按「用户取消 / 进程停机」改写成对应的原因。 */
 const CANCELLED_WHILE_WAITING_ENGINE =
@@ -162,6 +175,10 @@ export class CaseAgent {
   private step = 0;
   /** 最近一次成功观测到的页面。断言层的 `final` 就是它 */
   private page: Observation | null = null;
+  /** 已经把几次「没过半的 BLOCKED」改走了别的操作（上限 MAX_WEAK_BLOCKED_OVERRIDES） */
+  private weakBlockedOverrides = 0;
+  /** 自上一次成功执行以来，连续丢弃了几次决策（上限 MAX_CONSECUTIVE_DISCARDS） */
+  private consecutiveDiscards = 0;
 
   constructor(deps: AgentDeps) {
     this.deps = deps;
@@ -248,7 +265,8 @@ export class CaseAgent {
       if (!this.originAllowed(page.url)) {
         failureReason =
           `页面已跳出白名单（当前 ${page.url}，允许 ${caseDef.allowedOrigins.join(" / ")}）；` +
-          `越界之后发生的一切都不该算数，因此在此终止`;
+          `越界之后发生的一切都不该算数，因此在此终止` +
+          (this.step === 0 ? `。${loginRedirectHint(caseDef.authState)}` : "");
         break loop;
       }
 
@@ -298,7 +316,25 @@ export class CaseAgent {
       // 校验失败抛 InvalidDecision，**不执行任何动作**（这里不 catch：引擎输出
       // 不合法属于「意料之外的故障」，由 runner 写成 status: "error"，
       // 轨迹经 snapshot() 保留下来）。
-      const resolved = resolveDecision(space, decision);
+      const decided = resolveDecision(space, decision);
+
+      // BLOCKED 会结束运行，所以它必须过半才算数（见 policy.ts 的 BLOCKED_MIN_PROBABILITY）。
+      // 没过半就改走概率最大的非终止操作——仍然只用模型自己给出的选择，不编造动作。
+      const override =
+        this.weakBlockedOverrides < MAX_WEAK_BLOCKED_OVERRIDES ? overrideWeakBlocked(space, decision, decided) : null;
+      if (override !== null) {
+        this.weakBlockedOverrides += 1;
+        events.emit({
+          type: "run.log",
+          runId: this.runId,
+          level: "warn",
+          message:
+            `模型给 BLOCKED 的概率只有 ${decided.operationProbability.toFixed(2)}，没有过半，不据此结束运行；` +
+            `改走概率次高的 ${override.operation}（${override.operationProbability.toFixed(2)}）` +
+            `（第 ${this.weakBlockedOverrides}/${MAX_WEAK_BLOCKED_OVERRIDES} 次）`,
+        });
+      }
+      const resolved = override ?? decided;
 
       // `resolved` 是本迭代的局部 const，作用域外不存在——这就是不变量 1
       // 「决策先消费，再变更」在本实现里的落点：没有任何字段能把它带回下一轮，
@@ -327,13 +363,10 @@ export class CaseAgent {
         // 决策作出与结束之间页面可能已经变了：变了就不作数，重新观测。
         // DONE 建立在「它看到的那一页」上，页面换了则这个判断无意义。
         if (!(await session.isFresh(page))) {
-          events.emit({
-            type: "step.skipped",
-            runId: this.runId,
-            step: this.step,
-            reason: "终止决策作出后页面已变化，丢弃该决策并重新观测（废弃的决策不产生副作用）",
-          });
-          this.page = await this.observeOnce();
+          failureReason = await this.discardDecision(
+            "终止决策作出后页面已变化，丢弃该决策并重新观测（废弃的决策不产生副作用）",
+          );
+          if (failureReason !== null) break loop;
           continue loop;
         }
         this.status = resolved.operation === "DONE" ? "done" : "blocked";
@@ -389,13 +422,10 @@ export class CaseAgent {
         }
         // 输入前的第二次新鲜度复查：这里是「决策 -> 变更」之间最后一道门。
         if (!(await session.isFresh(page, resolved.action))) {
-          events.emit({
-            type: "step.skipped",
-            runId: this.runId,
-            step: this.step,
-            reason: "输入前复查发现页面已变化，丢弃这个陈旧的输入决策（不执行、不重试）",
-          });
-          this.page = await this.observeOnce();
+          failureReason = await this.discardDecision(
+            "输入前复查发现页面已变化，丢弃这个陈旧的输入决策（不执行、不重试）",
+          );
+          if (failureReason !== null) break loop;
           continue loop;
         }
         let generated: { text: string; textEngine: string | null; textLatencyMs: number };
@@ -448,15 +478,11 @@ export class CaseAgent {
             message: `${error.message}——按已执行记录，不重试`,
           });
         } else if (error instanceof StalePage || error instanceof OccludedTarget) {
-          events.emit({
-            type: "step.skipped",
-            runId: this.runId,
-            step: this.step,
-            reason:
-              `${error instanceof StalePage ? "陈旧" : "目标已不可用"}：${error.message}` +
+          failureReason = await this.discardDecision(
+            `${error instanceof StalePage ? "陈旧" : "目标已不可用"}：${error.message}` +
               `——动作未执行（浏览器未收到任何输入），重新观测后重新决策`,
-          });
-          this.page = await this.observeOnce();
+          );
+          if (failureReason !== null) break loop;
           continue loop;
         } else {
           throw error;
@@ -464,6 +490,7 @@ export class CaseAgent {
       }
       // 变更成功（或输入途中失败、可能已生效） -> 页面已不同 -> 为旧页面生成的文本不再可信
       this.textCache.clear();
+      this.consecutiveDiscards = 0;
 
       // ---- 11. 先记执行日志，再观测结果 -----------------------------------
       // 顺序关键：一次恰好发生在观测时的导航，不能让「我们点过了」从轨迹里消失。
@@ -634,6 +661,25 @@ export class CaseAgent {
       });
       return null;
     }
+  }
+
+  /**
+   * 丢弃本次决策：发 `step.skipped`、重新观测。
+   *
+   * 返回值是结束运行的原因：连续丢弃达到 `MAX_CONSECUTIVE_DISCARDS` 时把状态置为
+   * blocked 并返回原因，否则返回 null（调用方继续下一轮）。**先重新观测再判上限**：
+   * 断言层的 `final` 应当是最新的页面，而不是那张已经被判陈旧的。
+   */
+  private async discardDecision(reason: string): Promise<string | null> {
+    this.deps.events.emit({ type: "step.skipped", runId: this.runId, step: this.step, reason });
+    this.page = await this.observeOnce();
+    this.consecutiveDiscards += 1;
+    if (this.consecutiveDiscards < MAX_CONSECUTIVE_DISCARDS) return null;
+    this.status = "blocked";
+    return (
+      `连续 ${MAX_CONSECUTIVE_DISCARDS} 次决策在执行前被丢弃（最近一次：${reason}）：` +
+      `模型看不到自己上一次没执行成，页面不变时只会重复同一个选择，再问下去只是在消耗预算`
+    );
   }
 
   /** 观测一次。**读可以重试，变更不行**：导航恰好打断一次读取是正常现象。 */

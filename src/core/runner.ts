@@ -79,6 +79,7 @@ import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 
 import { AsyncQueue } from "../util/async.ts";
+import { authStatePath } from "../store/auth-states.ts";
 import { budgetOf, createBudgetMeter } from "./budget.ts";
 import { CaseAgent } from "./agent.ts";
 
@@ -417,9 +418,16 @@ export function createRunnerService(deps: RunnerDeps): RunnerService {
       }
 
       const produced = await deps.pool.withSession(
-        traceZip === null
-          ? {}
-          : { tracing: true, tracePath: join(runDirOf(active.runId), TRACE_ARTIFACT) },
+        {
+          ...(traceZip === null
+            ? {}
+            : { tracing: true, tracePath: join(runDirOf(active.runId), TRACE_ARTIFACT) }),
+          // 登录态只读载入、不回写：同一份文件被多个用例共用，一次运行里的登出或会话轮换
+          // 不该影响下一次运行。文件不存在时池会报一个能直接照做的错误。
+          ...(caseDef.authState === undefined
+            ? {}
+            : { storageStatePath: authStatePath(deps.settings.authDir, caseDef.authState) }),
+        },
         async (session) => {
           const agent = new CaseAgent({
             session,

@@ -26,7 +26,11 @@ import type { CaseStore, WriteOptions } from "../src/store/cases.ts";
 import type { CaseRevision } from "../src/schema/case.ts";
 import { CaseConflict, CaseNotFound } from "../src/store/cases.ts";
 import type { RunnerService, QueueStatus } from "../src/core/runner.ts";
-import type { BrowserPool } from "../src/browser/pool.ts";
+import type { BrowserPool, ContextOptions } from "../src/browser/pool.ts";
+import type { LoginManager, LoginWindowStatus } from "../src/browser/login.ts";
+import { LoginBusy } from "../src/browser/login.ts";
+import { createAuthStateStore } from "../src/store/auth-states.ts";
+import type { AuthStateSummary, StorageState } from "../src/store/auth-states.ts";
 
 const TOKEN = "test-token-0123456789abcdef";
 
@@ -44,6 +48,7 @@ function testSettings(overrides: Partial<Settings>): Settings {
     tracing: false,
     casesDir: "./cases",
     runsDir: "./runs",
+    authDir: "./auth",
     defaultEngine: "typesafe",
     ...overrides,
   };
@@ -114,11 +119,15 @@ function makeFakeRunner(counters: { cancelled: string[] }): RunnerService {
   };
 }
 
+/** 每次借 context 时传的选项。登录态是否被带上，只能从这里看出来 */
+const poolOptionsSeen: ContextOptions[] = [];
+
 function makeFakePool(): BrowserPool {
   return {
     start: async () => {},
-    withSession: async (_options, fn) =>
-      fn({
+    withSession: async (options, fn) => {
+      poolOptionsSeen.push(options);
+      return fn({
         goto: async () => ({}),
         observe: async () => ({}),
         isFresh: async () => true,
@@ -140,10 +149,60 @@ function makeFakePool(): BrowserPool {
         }),
         frameJpeg: async () => Buffer.from([0xff, 0xd8]),
         close: async () => {},
-      } as never),
+      } as never);
+    },
     saveStorageState: async () => {},
     activeContexts: () => 0,
     stop: async () => {},
+  };
+}
+
+/** 一份最小的 storageState。cookie 值用一个醒目的串，便于断言它**没有**出现在响应里 */
+const SECRET_COOKIE_VALUE = "super-secret-session-value";
+const SAMPLE_STATE: StorageState = {
+  cookies: [
+    {
+      name: "sid",
+      value: SECRET_COOKIE_VALUE,
+      domain: ".example.com",
+      path: "/",
+      expires: -1,
+      httpOnly: true,
+      secure: true,
+      sameSite: "Lax",
+    },
+  ],
+  origins: [{ origin: "https://example.com", localStorage: [{ name: "token", value: "t" }] }],
+};
+
+/**
+ * 登录窗口的替身：不弹浏览器，只记录状态。
+ * `busy` 打开时 open 抛 LoginBusy，用来验 409 的映射。
+ */
+const loginControl = { busy: false, opened: [] as { name: string; url: string }[] };
+
+function makeFakeLogin(): LoginManager {
+  let current: LoginWindowStatus | null = null;
+  return {
+    open: async (name, url) => {
+      if (loginControl.busy) throw new LoginBusy("someone-else");
+      loginControl.opened.push({ name, url });
+      current = { name, url, startedAt: new Date().toISOString(), state: "open", currentUrl: url, closedReason: null };
+      return current;
+    },
+    status: () => current,
+    capture: async () => {
+      if (current === null) throw new Error("没有开着的登录窗口");
+      const captured = { name: current.name, url: current.url, state: SAMPLE_STATE };
+      current = null;
+      return captured;
+    },
+    cancel: async () => {
+      current = null;
+    },
+    stop: async () => {
+      current = null;
+    },
   };
 }
 
@@ -198,6 +257,7 @@ before(async () => {
   settings = testSettings({
     casesDir: join(root, "cases"),
     runsDir: join(root, "runs"),
+    authDir: join(root, "auth"),
   });
   await mkdir(settings.runsDir, { recursive: true });
 
@@ -210,6 +270,8 @@ before(async () => {
     runner: makeFakeRunner(counters),
     pool: makeFakePool(),
     events,
+    authStates: createAuthStateStore({ root: settings.authDir }),
+    login: makeFakeLogin(),
   };
   server = createServer({ settings, security, services });
   // 传 0：端口由系统分配，createServer 会把 security.port 校正成真实端口
@@ -528,4 +590,170 @@ test("引擎列表按 docs/api.md §3.1 的形状返回", async () => {
 // 供未来扩展：确认临时目录确实被创建（这条也顺带记录 settings 的形状要求）
 test("测试用的 runsDir 是真的目录", async () => {
   await writeFile(join(resolve(settings.runsDir), "index.jsonl"), "", "utf8");
+});
+
+// ---------------------------------------------------------------------------
+// 登录态
+// ---------------------------------------------------------------------------
+
+test("上传登录态：落盘成功，响应里只有摘要、绝不含 cookie 值", async () => {
+  const res = await raw(port, {
+    method: "POST",
+    path: "/api/auth-states",
+    headers: authed(),
+    body: JSON.stringify({ name: "upload-ok", state: SAMPLE_STATE, loginUrl: "https://example.com/" }),
+  });
+  assert.equal(res.status, 200, res.body);
+  assert.equal(res.body.includes(SECRET_COOKIE_VALUE), false, "响应里不该出现 cookie 值");
+  const body = JSON.parse(res.body) as AuthStateSummary & { usedBy: unknown[] };
+  assert.equal(body.name, "upload-ok");
+  assert.equal(body.cookieCount, 1);
+  assert.deepEqual(body.sites, ["example.com"]);
+  assert.equal(body.source, "import");
+  assert.deepEqual(body.usedBy, []);
+
+  const list = await raw(port, { method: "GET", path: "/api/auth-states", headers: host() });
+  assert.equal(list.status, 200);
+  assert.equal(list.body.includes(SECRET_COOKIE_VALUE), false);
+  assert.equal((JSON.parse(list.body) as { name: string }[]).some((item) => item.name === "upload-ok"), true);
+});
+
+test("上传登录态：同名已存在时 409，带 overwrite 才覆盖", async () => {
+  const payload = { name: "upload-dup", state: SAMPLE_STATE };
+  const first = await raw(port, { method: "POST", path: "/api/auth-states", headers: authed(), body: JSON.stringify(payload) });
+  assert.equal(first.status, 200);
+  const again = await raw(port, { method: "POST", path: "/api/auth-states", headers: authed(), body: JSON.stringify(payload) });
+  assert.equal(again.status, 409);
+  const forced = await raw(port, {
+    method: "POST",
+    path: "/api/auth-states",
+    headers: authed(),
+    body: JSON.stringify({ ...payload, overwrite: true }),
+  });
+  assert.equal(forced.status, 200);
+});
+
+test("上传登录态：形状不对 / 名字非法 返回 400", async () => {
+  const bad = await raw(port, {
+    method: "POST",
+    path: "/api/auth-states",
+    headers: authed(),
+    body: JSON.stringify({ name: "bad-shape", state: { cookies: "nope" } }),
+  });
+  assert.equal(bad.status, 400);
+  assert.match(bad.body, /storageState/);
+
+  for (const name of ["../etc", "A", "x", "has.dot"]) {
+    const res = await raw(port, {
+      method: "POST",
+      path: "/api/auth-states",
+      headers: authed(),
+      body: JSON.stringify({ name, state: SAMPLE_STATE }),
+    });
+    assert.equal(res.status, 400, `名字 ${name} 应被拒绝`);
+  }
+});
+
+test("上传登录态的请求体上限单独放宽，其他端点仍是 8KB", async () => {
+  // 造一份超过 8KB 的登录态：真实站点几十个 cookie 就是这个量级
+  const big: StorageState = {
+    cookies: Array.from({ length: 80 }, (_, i) => ({ ...SAMPLE_STATE.cookies[0]!, name: `c${i}`, value: "v".repeat(100) })),
+    origins: [],
+  };
+  const body = JSON.stringify({ name: "upload-big", state: big });
+  assert.equal(body.length > MAX_BODY_BYTES, true);
+  const res = await raw(port, { method: "POST", path: "/api/auth-states", headers: authed(), body });
+  assert.equal(res.status, 200, res.body);
+
+  const other = await raw(port, { method: "POST", path: "/api/runs", headers: authed(), body });
+  assert.equal(other.status, 413);
+});
+
+test("登录窗口：打开 -> 保存，登录态以 source=login 落盘", async () => {
+  const open = await raw(port, {
+    method: "POST",
+    path: "/api/auth-window",
+    headers: authed(),
+    body: JSON.stringify({ name: "win-ok", url: "https://example.com/app" }),
+  });
+  assert.equal(open.status, 200, open.body);
+  assert.equal((JSON.parse(open.body) as LoginWindowStatus).state, "open");
+
+  const status = await raw(port, { method: "GET", path: "/api/auth-window", headers: host() });
+  assert.equal((JSON.parse(status.body) as LoginWindowStatus).name, "win-ok");
+
+  const save = await raw(port, { method: "POST", path: "/api/auth-window/save", headers: authed() });
+  assert.equal(save.status, 200, save.body);
+  const saved = JSON.parse(save.body) as AuthStateSummary;
+  assert.equal(saved.source, "login");
+  assert.equal(saved.loginUrl, "https://example.com/app");
+  assert.equal(save.body.includes(SECRET_COOKIE_VALUE), false);
+
+  const after = await raw(port, { method: "GET", path: "/api/auth-window", headers: host() });
+  assert.equal(after.body, "null");
+});
+
+test("登录窗口：名字已存在且没说要覆盖时，开窗之前就 409（不让人白登录一次）", async () => {
+  const before = loginControl.opened.length;
+  const res = await raw(port, {
+    method: "POST",
+    path: "/api/auth-window",
+    headers: authed(),
+    body: JSON.stringify({ name: "win-ok", url: "https://example.com/app" }),
+  });
+  assert.equal(res.status, 409);
+  assert.equal(loginControl.opened.length, before, "冲突时不该弹窗");
+});
+
+test("登录窗口：已有窗口开着时 409", async () => {
+  loginControl.busy = true;
+  try {
+    const res = await raw(port, {
+      method: "POST",
+      path: "/api/auth-window",
+      headers: authed(),
+      body: JSON.stringify({ name: "win-busy", url: "https://example.com/" }),
+    });
+    assert.equal(res.status, 409);
+  } finally {
+    loginControl.busy = false;
+  }
+});
+
+test("登录窗口：没有窗口时保存返回 409 而不是 500", async () => {
+  const res = await raw(port, { method: "POST", path: "/api/auth-window/save", headers: authed() });
+  assert.equal(res.status, 409);
+});
+
+test("验证登录态：带着它的文件借 context；停在登录框上判为失效", async () => {
+  await raw(port, {
+    method: "POST",
+    path: "/api/auth-states",
+    headers: authed(),
+    body: JSON.stringify({ name: "verify-me", state: SAMPLE_STATE, loginUrl: "https://example.com/" }),
+  });
+  poolOptionsSeen.length = 0;
+  const res = await raw(port, { method: "POST", path: "/api/auth-states/verify-me/verify", headers: authed() });
+  assert.equal(res.status, 200, res.body);
+  assert.equal(poolOptionsSeen[0]?.storageStatePath, join(settings.authDir, "verify-me.json"));
+  // 替身页面停在同源、但有 1 个密码框：按「停在了登录页」处理
+  const result = JSON.parse(res.body) as { ok: boolean; detail: string };
+  assert.equal(result.ok, false);
+  assert.match(result.detail, /密码框/);
+
+  const summary = await raw(port, { method: "GET", path: "/api/auth-states/verify-me", headers: host() });
+  assert.equal((JSON.parse(summary.body) as AuthStateSummary).lastVerified?.ok, false);
+});
+
+test("删除登录态：不存在 404，存在 204", async () => {
+  const missing = await raw(port, { method: "DELETE", path: "/api/auth-states/nope-nope", headers: authed() });
+  assert.equal(missing.status, 404);
+  await raw(port, {
+    method: "POST",
+    path: "/api/auth-states",
+    headers: authed(),
+    body: JSON.stringify({ name: "delete-me", state: SAMPLE_STATE }),
+  });
+  const res = await raw(port, { method: "DELETE", path: "/api/auth-states/delete-me", headers: authed() });
+  assert.equal(res.status, 204);
 });

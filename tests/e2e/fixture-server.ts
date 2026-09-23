@@ -100,8 +100,12 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
       return;
     }
 
-    // base 只用来让 URL 解析器有个起点，不影响结果：下面只用 pathname
-    const pathname = decodeURIComponent(new URL(request.url ?? "/", "http://127.0.0.1").pathname);
+    // base 只用来让 URL 解析器有个起点，不影响结果：下面只用 pathname 与 delay
+    const url = new URL(request.url ?? "/", "http://127.0.0.1");
+    const pathname = decodeURIComponent(url.pathname);
+    // `?delay=<ms>`：模拟慢接口（上限 5s）。late.html 用它造出「DOMContentLoaded 之后才到的列表」
+    const delay = Math.min(Number(url.searchParams.get("delay") ?? 0) || 0, 5_000);
+    if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
     const filePath = resolveFile(pathname);
     if (filePath === null) {
       respond(response, 403, "text/plain; charset=utf-8", "路径越界");

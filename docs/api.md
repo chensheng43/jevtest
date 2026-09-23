@@ -183,6 +183,43 @@ switch 分支与 `schema/events.ts` 的判别联合一一对应。
 `trace.zip` 可用 `npx playwright show-trace` 直接打开，带时间轴与每步 DOM 快照——
 **排查任何失败都先看它**，比读报告快得多。
 
+### 3.6 登录态
+
+用例用 `authState: <名字>` 引用一份登录态（见 [`case-format.md`](case-format.md)）。
+**任何响应都不含 cookie 值**，只有摘要 `AuthStateSummary`：
+
+```ts
+{
+  name: string, loginUrl: string | null, source: "login" | "import", savedAt: string,
+  cookieCount: number, sites: string[], earliestExpiry: string | null, hasSessionCookies: boolean,
+  lastVerified: { at, ok, url, finalUrl, detail } | null,
+  usedBy: { id: string, title: string }[]   // 列表与单个查询时附带
+}
+```
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/api/auth-states` | 列表 |
+| POST | `/api/auth-states` | 上传 `{ name, state, loginUrl?, overwrite? }`。`state` 是 storageState 对象或其 JSON 文本。同名已存在且未带 `overwrite: true` 时 **409**。**本端点请求体上限 1MB**，其余仍是 8KB |
+| GET | `/api/auth-states/:name` | 单个 |
+| POST | `/api/auth-states/:name/verify` | `{ url? }`，缺省用 `loginUrl`。用这份登录态无头打开地址：最终 origin 不变且页面没有密码框才算 `ok`。**不调用模型** |
+| DELETE | `/api/auth-states/:name` | 仍被用例引用时 **409**（`detail.usedBy`），带 `?force=1` 才删 |
+
+登录窗口。服务只监听 127.0.0.1，所以服务端弹出的窗口就在操作 Web 的人桌面上；
+同一时刻只开一个：
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/api/auth-window` | `LoginWindowStatus \| null`：`{ name, url, startedAt, state: "open" \| "closed", currentUrl, closedReason }`。`closed` = 人把窗口关了或 30 分钟超时，**没有保存** |
+| POST | `/api/auth-window` | `{ name, url, overwrite? }` 弹出有界面的浏览器并打开 `url`。同名已存在且未带 `overwrite` 时 **409**（`detail.exists`，在弹窗**之前**判）；已有窗口开着时 **409**（`detail.window`）；弹不出来（无图形界面）时 **502** |
+| POST | `/api/auth-window/save` | 导出登录态、落盘、关窗，返回摘要。没有开着的窗口时 **409** |
+| POST | `/api/auth-window/cancel` | 关窗，不保存 |
+
+登录窗口不挂在 `/api/auth-states/` 下：`login`、`import` 本身是合法的登录态名字，挂在同一层会与 `:name` 撞路由。
+
+`POST /api/cases/:id/admit` 同样带着用例的登录态探测；打开 `startUrl` 后被跳出白名单时，
+在 `blocking` 首条说明，并在响应里附 `redirectedTo`（否则为 `null`）。
+
 ---
 
 ## 4. 非 `/api` 路径
@@ -201,7 +238,7 @@ switch 分支与 `schema/events.ts` 的判别联合一一对应。
 
 | 能力 | 状态 |
 | --- | --- |
-| 登录态管理（`storageState` 上传/复用） | 底层能力已规划，无端点与用例字段 |
+| 登录态自动续期 | 无。过期后由人重新登录（§3.6） |
 | 套件（一组用例）的增删改 | 无。`suiteRunId` 只是批量运行的关联 id，不是持久化实体 |
 | 用例 revision 的 diff 视图 | 未实现 |
 | 权限 / 多用户 | 无。单机工具，靠 §2 的三重守卫保护 |

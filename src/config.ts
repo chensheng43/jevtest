@@ -41,6 +41,8 @@ export interface Settings {
   tracing: boolean;
   casesDir: string;
   runsDir: string;
+  /** 登录态文件（`<名字>.json`）所在目录。内含会话 cookie，必须不入库 */
+  authDir: string;
   /** 用例未指定 engine 时使用 */
   defaultEngine: string;
 }
@@ -67,6 +69,7 @@ const DEFAULT_TEXT_MODEL_BASE_URL = "https://api.deepseek.com/v1";
 const DEFAULT_TEXT_MODEL = "deepseek-chat";
 const DEFAULT_CASES_DIR = "./cases";
 const DEFAULT_RUNS_DIR = "./runs";
+const DEFAULT_AUTH_DIR = "./auth";
 /**
  * 用例未指定 engine 时的取值。**必须与 `schema/case.ts` 的 `DEFAULT_ENGINE` 一致**——
  * 那处是 schema 给 `Case.engine` 填的默认值，两处不同会让「没写 engine 的用例」
@@ -232,6 +235,7 @@ const envSchema = z.object({
   JEVTEST_TRACING: booleanField("JEVTEST_TRACING", true),
   JEVTEST_CASES_DIR: stringField("JEVTEST_CASES_DIR", DEFAULT_CASES_DIR),
   JEVTEST_RUNS_DIR: stringField("JEVTEST_RUNS_DIR", DEFAULT_RUNS_DIR),
+  JEVTEST_AUTH_DIR: stringField("JEVTEST_AUTH_DIR", DEFAULT_AUTH_DIR),
   JEVTEST_DEFAULT_ENGINE: stringField("JEVTEST_DEFAULT_ENGINE", DEFAULT_ENGINE),
 });
 
@@ -281,6 +285,7 @@ export function loadSettings(env?: NodeJS.ProcessEnv): Settings {
     tracing: values.JEVTEST_TRACING,
     casesDir: values.JEVTEST_CASES_DIR,
     runsDir: values.JEVTEST_RUNS_DIR,
+    authDir: values.JEVTEST_AUTH_DIR,
     defaultEngine: values.JEVTEST_DEFAULT_ENGINE,
   };
 }

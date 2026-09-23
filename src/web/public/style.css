@@ -1000,6 +1000,160 @@ tr.row-failed > td {
   }
 }
 
+/* ------------------------------------------------------------------------
+ * 登录态
+ * ---------------------------------------------------------------------- */
+
+/* 登录流程卡片：登录态页与用例编辑器共用。左侧色条表示「这是一段正在进行的操作」，
+   与普通的内容卡片区分开。 */
+.login-flow {
+  border-left: 3px solid var(--bs-primary);
+  margin: 0.5rem 0 1rem;
+}
+
+.login-flow-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.5rem;
+}
+
+.login-flow-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
+
+.login-flow-steps {
+  margin: 0.25rem 0 0.5rem;
+  padding-left: 1.25rem;
+}
+
+.login-flow-steps li {
+  margin: 0.2rem 0;
+}
+
+.login-flow-where {
+  color: var(--bs-secondary-color);
+  overflow-wrap: anywhere;
+  margin: 0.25rem 0;
+}
+
+/* 「等待你完成登录」：一个缓慢呼吸的点，告诉人这边在等，不是卡住了 */
+.login-flow-live {
+  color: var(--bs-secondary-color);
+  font-size: 0.82rem;
+}
+
+.login-flow-live::before {
+  content: "";
+  display: inline-block;
+  width: 0.5rem;
+  height: 0.5rem;
+  margin-right: 0.4rem;
+  border-radius: 50%;
+  background: var(--bs-primary);
+  animation: login-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes login-pulse {
+  50% {
+    opacity: 0.25;
+  }
+}
+
+.verify-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0.35rem 0;
+}
+
+/* 表头不折行：两个字一行的表头读起来像排版事故 */
+.auth-table th {
+  white-space: nowrap;
+}
+
+/* 操作按钮竖排：横排三个按钮会把表格撑出容器，最右边的按钮被裁掉 */
+.auth-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.35rem;
+}
+
+.auth-actions .btn,
+.auth-usable .btn {
+  white-space: nowrap;
+}
+
+/* 名称列下面的登录地址可能很长：允许在任意处折行，免得它把整张表撑宽、把按钮挤出去 */
+.auth-table td:nth-child(1) {
+  min-width: 11rem;
+  max-width: 15rem;
+  overflow-wrap: anywhere;
+}
+
+/* 站点在「、」处折行即可，不必占满一整行 */
+.auth-table td:nth-child(2) {
+  max-width: 14rem;
+}
+
+.auth-usable {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.35rem;
+  margin-top: 0.35rem;
+}
+
+.login-preflight {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.login-preflight .login-flow-actions {
+  margin-top: 0;
+}
+
+.login-preflight .verify-line {
+  margin: 0;
+}
+
+/* 「选了登录态但用例还没保存」：琥珀色，是一个待办，不是错误 */
+.auth-pending {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0.4rem 0;
+  padding: 0.45rem 0.75rem;
+  border-radius: var(--bs-border-radius);
+  background: var(--bs-warning-bg-subtle);
+  color: var(--bs-warning-text-emphasis);
+  font-weight: 600;
+}
+
+.login-flow-next {
+  margin-top: 0.75rem;
+}
+
+.apply-to-case {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.login-redirect {
+  margin: 0.5rem 0;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

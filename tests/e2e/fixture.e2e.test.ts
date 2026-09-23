@@ -90,6 +90,7 @@ function makeSettings(overrides: Partial<Settings>): Settings {
     tracing: true,
     casesDir: "./cases",
     runsDir: "./runs",
+    authDir: "./auth",
     defaultEngine: "typesafe",
     ...overrides,
   };
@@ -103,6 +104,7 @@ before(async () => {
   const settings = makeSettings({
     casesDir: join(root, "cases"),
     runsDir: join(root, "runs"),
+    authDir: join(root, "auth"),
   });
 
   const engineFor = (): DecisionEngine => {
@@ -239,9 +241,16 @@ e2e("观测：按可访问名索引元素，几何上不可见的元素不进候
       false,
       `移出视口的按钮不该进候选集：${labels.join(" | ")}`,
     );
-    // 被浮层遮挡的按钮：它自己一切正常（尺寸、可见性、在视口内都成立），
-    // 只有 elementFromPoint 能发现中心点被盖住了 —— 所以它**在**候选集里。
-    assert.ok(labels.some((label) => label.includes("被浮层遮挡的按钮")));
+    // 一直被浮层盖住的按钮：它自己一切正常（尺寸、可见性、在视口内都成立），
+    // 只有 elementFromPoint 能发现中心点被盖住了。观测时就做这次命中测试，所以它**不在**
+    // 候选集里——否则模型会反复选中它、输入前被拦、再选它，每一轮都是一次模型调用。
+    assert.equal(
+      labels.includes("一直被浮层盖住的按钮"),
+      false,
+      `被盖住的按钮不该进候选集：${labels.join(" | ")}`,
+    );
+    // 浮层要等陷阱生效才出现（KEEP_TRAPS 下永不出现）：观测时它是可点的，必须在候选集里。
+    assert.ok(labels.includes("观测后会被浮层盖住的按钮"));
     // 禁用的选项不进候选集（原生 select 的 option 是一个个独立 target）。
     assert.equal(labels.some((label) => label.includes("扫描仪")), false);
   });
@@ -249,11 +258,14 @@ e2e("观测：按可访问名索引元素，几何上不可见的元素不进候
 
 e2e("遮挡命中测试：观测时可用、输入前被盖住的元素绝不被点击", async () => {
   await wiring.pool.withSession({ tracing: false }, async (session) => {
-    const page = await session.goto(`${fixture.url}/index.html${KEEP_TRAPS}`, {
+    const page = await session.goto(`${fixture.url}/index.html`, {
       waitUntil: "domcontentloaded",
     });
-    const target = page.actions.find((action) => action.label.includes("被浮层遮挡的按钮"));
-    assert.ok(target !== undefined);
+    const target = page.actions.find((action) => action.label.includes("观测后会被浮层盖住的按钮"));
+    assert.ok(target !== undefined, "这个按钮在陷阱生效前必须可点");
+
+    // 等浮层出现：制造「决策做出之后它被盖住了」这个时序
+    await new Promise((settle) => setTimeout(settle, TRAP_DELAY_MS + 300));
 
     // 这就是为什么点击必须用 page.mouse.click(x, y) 而不是 locator.click()：
     // locator 会替我们滚过去并点击，而此刻**不该继续点**（architecture §7.1）。
@@ -335,6 +347,17 @@ e2e("导航在途时观测：等文档就绪，而不是把「读不到」判成
     assert.match(page.url, /\/index\.html/, "观测到的应当是那份已提交的新文档");
     assert.ok(page.actions.length > 0, "等到文档就绪之后，元素表必须是有内容的");
     assert.ok(page.text.length > 0, "可见文本同样应当读到了");
+  });
+});
+
+e2e("打开起始页：等接口回来再做第一次观测，而不是只看到 DOMContentLoaded 时的外壳", async () => {
+  // 这条来自一次真跑：后台页面在 DOMContentLoaded 时只有导航栏，列表与「批量导入」
+  // 按钮是随后一次 XHR 拉回来的。第一次观测落在那之前，模型看不到能做的事，直接 BLOCKED。
+  await wiring.pool.withSession({ tracing: false }, async (session) => {
+    const page = await session.goto(`${fixture.url}/late.html`, { waitUntil: "domcontentloaded" });
+    const labels = page.actions.map((action) => action.label);
+    assert.ok(labels.includes("批量导入产品库"), `第一次观测就应当看到晚到的按钮，实际：${labels.join(" / ")}`);
+    assert.ok(labels.includes("导入设置"));
   });
 });
 

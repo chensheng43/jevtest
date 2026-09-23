@@ -54,6 +54,7 @@ function testSettings(overrides: Partial<Settings> = {}): Settings {
     tracing: false,
     casesDir: "./cases",
     runsDir: "./runs",
+    authDir: "./auth",
     defaultEngine: "scripted",
     ...overrides,
   };
@@ -762,6 +763,42 @@ test("tracing 开启时：trace 落在运行目录下，artifacts.traceZip 指�
   } finally {
     await rm(runsDir, { recursive: true, force: true });
   }
+});
+
+// ---------------------------------------------------------------------------
+// 登录态
+// ---------------------------------------------------------------------------
+
+test("登录态：用例带 authState 时，按名字解析成 authDir 下的文件交给池；不带则不传", async () => {
+  const harness = makeHarness({});
+  harness.runner.start();
+  await runAll(harness, [makeCase({ id: "with-auth", authState: "shop-admin" }), makeCase({ id: "no-auth" })]);
+
+  const [withAuth, withoutAuth] = harness.pool.contextOptions;
+  assert.equal(withAuth?.storageStatePath, join("./auth", "shop-admin.json"));
+  assert.equal(withoutAuth?.storageStatePath, undefined, "没配登录态的用例必须是一个全新、未登录的浏览器");
+  harness.runner.cancelAll();
+  await harness.runner.stop();
+});
+
+test("一打开就被跳出白名单：失败原因指向「配登录态」，而不是只说越界", async () => {
+  const redirected = (): FakeSession =>
+    new FakeSession({ observations: [makeObservation({ url: "https://sso.other.test/login?next=x" })] });
+
+  const harness = makeHarness({ session: redirected });
+  harness.runner.start();
+  const [plain, withAuth] = await runAll(harness, [
+    makeCase({ id: "plain" }),
+    makeCase({ id: "expired", authState: "stale-login" }),
+  ]);
+
+  assert.equal(plain?.status, "guardrail_blocked");
+  assert.match(plain?.failureReason ?? "", /要求登录/);
+  assert.match(plain?.failureReason ?? "", /不要为此放宽白名单/);
+  assert.equal(withAuth?.status, "guardrail_blocked");
+  assert.match(withAuth?.failureReason ?? "", /stale-login.*过期/);
+  harness.runner.cancelAll();
+  await harness.runner.stop();
 });
 
 test("DEFAULT_STOP_TIMEOUT_MS：默认超时必须存在且大到一个正常的收尾不会误判", () => {

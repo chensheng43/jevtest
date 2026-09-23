@@ -48,10 +48,12 @@ import { loadSettings, missingCredentials } from "./config.ts";
 import type { Settings } from "./config.ts";
 import { createBrowserPool } from "./browser/pool.ts";
 import type { BrowserPool } from "./browser/pool.ts";
+import { createLoginManager } from "./browser/login.ts";
 import { createEngine, listEngines } from "./engine/registry.ts";
 import type { DecisionEngine } from "./engine/types.ts";
 import { CASE_ID_PATTERN, CaseNotFound, FROZEN_CASE_FILE, createCaseStore } from "./store/cases.ts";
 import type { CaseStore } from "./store/cases.ts";
+import { createAuthStateStore } from "./store/auth-states.ts";
 import { STATUS_LABELS, createRunnerService } from "./core/runner.ts";
 import type { RunnerService } from "./core/runner.ts";
 import { persistReport, readReport, toJUnit, toMarkdown } from "./core/report.ts";
@@ -242,7 +244,9 @@ export function createWiring(
     events: events.sink,
   });
 
-  const services: Services = { settings, store, runner, pool, events };
+  const authStates = createAuthStateStore({ root: settings.authDir });
+  const login = createLoginManager();
+  const services: Services = { settings, store, runner, pool, events, authStates, login };
   return { settings, store, pool, runner, services };
 }
 
@@ -888,6 +892,15 @@ function createCaseStoreServices(settings: Settings, store: CaseStore): Services
       peek: () => null,
       bus: { emit: () => {}, subscribe: notStarted("事件日志") },
       retire: () => {},
+    },
+    // 登录态仓库是纯文件读写，没有副作用，给真的；登录窗口会弹浏览器，给桩
+    authStates: createAuthStateStore({ root: settings.authDir }),
+    login: {
+      open: notStarted("登录窗口"),
+      status: () => null,
+      capture: notStarted("登录窗口"),
+      cancel: async () => {},
+      stop: async () => {},
     },
   };
 }

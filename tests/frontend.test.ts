@@ -23,6 +23,7 @@ import { join, resolve } from "node:path";
 import { TOKEN_HEADER, resolveVendorPath } from "../src/web/security.ts";
 import { CaseDefinitionSchema } from "../src/schema/case.ts";
 import { parseCase } from "../src/schema/yaml.ts";
+import { loginRedirectHint } from "../src/core/guard.ts";
 
 const PUBLIC_DIR = join(import.meta.dirname, "..", "src", "web", "public");
 const read = (name: string) => readFileSync(join(PUBLIC_DIR, name), "utf8");
@@ -192,6 +193,7 @@ interface EditorCore {
   normalizeDraft: (def: unknown) => Record<string, unknown>;
   assertionRows: (draft: Record<string, unknown>) => { recipe: { kind: string }; path: string; value: unknown }[];
   draftSummary: (draft: Record<string, unknown>) => { assertions: number; limits: number };
+  suggestAuthName: (url: string) => string;
 }
 
 /**
@@ -207,7 +209,7 @@ function editorCore(source: string): EditorCore {
     .map((match) => match[1] ?? "");
   assert.ok(blocks.length >= 2, `app.js 里应该有两段标了「#region 纯函数」的代码，实际 ${blocks.length} 段`);
   const factory = new Function(`${blocks.join("\n")}
-    return { formToDefinition, normalizeDraft, assertionRows, draftSummary };`);
+    return { formToDefinition, normalizeDraft, assertionRows, draftSummary, suggestAuthName };`);
   return factory() as EditorCore;
 }
 
@@ -239,6 +241,7 @@ test("全覆盖：每一个配方与每一处原始字段都落得下去", () =>
     goal: "把所有字段都设一遍",
     startUrl: "https://example.test/",
     allowedOrigins: ["https://example.test"],
+    authState: "example-admin",
     mode: "readonly",
     budget: { maxSteps: 10, maxModelCalls: 11, maxInputTokens: 12, maxCostUsd: 0.5, maxElapsedMs: 13 },
     guardrails: [{ labelContains: "删除", role: "button", reason: "别删东西" }],
@@ -282,6 +285,15 @@ test("全覆盖：每一个配方与每一处原始字段都落得下去", () =>
   );
 });
 
+test("登录态名字建议：取主机名第一段并规整成合法名字；推不出来给空串", () => {
+  const core = editorCore(JS);
+  assert.equal(core.suggestAuthName("https://shop_test9.example.com/products"), "shop-test9");
+  assert.equal(core.suggestAuthName("https://www.example.com/"), "example");
+  assert.equal(core.suggestAuthName("not a url"), "");
+  assert.equal(core.suggestAuthName("https://a.com/"), "");
+  assert.equal(core.suggestAuthName("http://127.0.0.1:8080/"), "");
+});
+
 test("空的 statusIn 必须原样活着——它不是「没设」，而是「任何结束方式都不接受」", () => {
   const core = editorCore(JS);
   const def = CaseDefinitionSchema.parse({
@@ -296,4 +308,13 @@ test("空的 statusIn 必须原样活着——它不是「没设」，而是「�
     { trajectory: { statusIn: [], maxIdenticalConsecutive: 3 } },
     "空 statusIn 被丢掉了：断言会退回默认的 done，一条必然失败的检查就这样变成了会通过的条件",
   );
+});
+
+test("结果页从失败原因里读「这次运行带的登录态」：正则必须与 guard.ts 写出的文案对得上", () => {
+  // 两边各改各的不会报错，只会让「登录态过期了」被说成「用例没选登录态」——引导完全反了
+  const pattern = /\/用例已带登录态 \(\[a-z0-9\]\[a-z0-9-\]\*\)\//;
+  assert.match(JS, pattern, "app.js 里读登录态名字的正则变了，同步改这条测试与 guard.ts 的文案");
+  const read = /用例已带登录态 ([a-z0-9][a-z0-9-]*)/.exec(loginRedirectHint("shop-test9"));
+  assert.equal(read?.[1], "shop-test9");
+  assert.equal(/用例已带登录态 ([a-z0-9][a-z0-9-]*)/.exec(loginRedirectHint(undefined)), null);
 });

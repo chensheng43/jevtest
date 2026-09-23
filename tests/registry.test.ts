@@ -48,6 +48,7 @@ function settingsWith(over: Partial<Settings> = {}): Settings {
     tracing: false,
     casesDir: "./cases",
     runsDir: "./runs",
+    authDir: "./auth",
     defaultEngine: TYPESAFE_ENGINE_NAME,
   };
   return Object.assign(base, over);

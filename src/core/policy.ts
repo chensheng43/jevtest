@@ -607,8 +607,79 @@ export function resolveDecision(space: ActionSpace, decision: DecisionResult): R
   const operationAnswer = validateChoice(rawOperationAnswer, operationQuestion);
   // 候选集只由 Operation 字面量构成（usableOperations），因此这个收窄是可靠的。
   const operation = operationAnswer.choice as Operation;
+  return resolveOperation(space, questions, decision, operationAnswer, operation, operationAnswer.confidence);
+}
+
+/**
+ * 「BLOCKED（放弃）」至少要有这么大的概率，才结束运行。
+ *
+ * BLOCKED 是不可逆的：它直接结束运行，而别的操作走错了一步，下一步还能纠正。
+ * 所以对它不能只看「是不是最大项」，还要看是不是**过半**。
+ * 实测一次真跑：页面加载完之后，模型给 BLOCKED 0.46、CLICK 0.35、TYPE_TEXT 0.15——
+ * 超过一半的概率认为「还能动」，却因为 BLOCKED 单项最大而结束了整个运行。
+ */
+export const BLOCKED_MIN_PROBABILITY = 0.5;
+
+/**
+ * 一次运行里最多替换几次「没过半的 BLOCKED」。
+ * 真卡死的页面上模型会一直这样犹豫；次数用完之后照常接受 BLOCKED，
+ * 不让它靠替换出来的动作一直耗到预算上限。
+ */
+export const MAX_WEAK_BLOCKED_OVERRIDES = 3;
+
+/**
+ * BLOCKED 没过半时，改走概率最大的**非终止**操作（及其目标 head 的选择）。
+ * 返回 `null` = 不替换，照常接受这个 BLOCKED：
+ *   - 不是 BLOCKED，或它已过半；
+ *   - 分布是合成的（degenerate）：没有真概率可比；
+ *   - 替换目标的回答不可用（该 head 缺失或不合法）。只校验被选中的 head 是
+ *     resolveDecision 的纪律，一个没被选中的 head 答坏了，不该让整步失败。
+ *
+ * 替换后的 `operationProbability` / `confidence` 如实是那个操作自己的概率（比如 0.35），
+ * 报告里看得出这一步是在低把握下走的。
+ */
+export function overrideWeakBlocked(
+  space: ActionSpace,
+  decision: DecisionResult,
+  resolved: Resolved,
+): Resolved | null {
+  if (resolved.operation !== "BLOCKED" || resolved.distribution !== "full") return null;
+  if (resolved.operationProbability >= BLOCKED_MIN_PROBABILITY) return null;
+
+  const questions = buildQuestions(space);
+  const operationQuestion = questions.find((question) => question.key === "operation");
+  const rawOperationAnswer = decision.answers["operation"];
+  if (operationQuestion === undefined || rawOperationAnswer === undefined) return null;
+  const operationAnswer = validateChoice(rawOperationAnswer, operationQuestion);
+
+  let best: Operation | null = null;
+  for (const option of operationQuestion.options) {
+    const candidate = option.id as Operation;
+    if (isTerminal(candidate)) continue;
+    if (best === null || probabilityOf(operationAnswer, candidate) > probabilityOf(operationAnswer, best)) {
+      best = candidate;
+    }
+  }
+  if (best === null || probabilityOf(operationAnswer, best) <= 0) return null;
+
+  try {
+    return resolveOperation(space, questions, decision, operationAnswer, best, probabilityOf(operationAnswer, best));
+  } catch (error) {
+    if (error instanceof InvalidDecision) return null;
+    throw error;
+  }
+}
+
+/** 已选定 `operation` 之后的解析：终止 / 页面级 / 带目标三种，见 resolveDecision */
+function resolveOperation(
+  space: ActionSpace,
+  questions: Question[],
+  decision: DecisionResult,
+  operationAnswer: Answer,
+  operation: Operation,
+  operationConfidence: number,
+): Resolved {
   const operationProbability = probabilityOf(operationAnswer, operation);
-  const operationConfidence = operationAnswer.confidence;
 
   if (isTerminal(operation)) {
     return {

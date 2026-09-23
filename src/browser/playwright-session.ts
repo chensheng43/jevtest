@@ -94,6 +94,20 @@ export const SETTLE_MS = { default: 50, combobox: 200 } as const;
 export const DOCUMENT_READY_TIMEOUT_MS = 2_000;
 
 /**
+ * 打开起始页之后，最多再等多久「网络安静下来」（Playwright 的 `networkidle`：
+ * 500ms 内没有进行中的请求）才做第一次观测。
+ *
+ * 为什么需要：`goto` 只等到 DOMContentLoaded，而后台管理类的单页应用在那一刻
+ * 通常只有外壳——列表、按钮是随后一次 XHR 拉回来才渲染的。实测一次真跑：
+ * 第一次观测只有导航栏，模型看不到「批量导入」「导入设置」，第一个决策就是 BLOCKED。
+ *
+ * 为什么有上限：带轮询、长连接的页面永远等不到 networkidle。等不到就按时继续——
+ * 这只是给第一次观测一个更好的起点，不是运行的闸。只用在 goto 上：
+ * 每一步动作之后都这样等，会把带轮询的页面每一步都拖长到上限。
+ */
+export const LOAD_SETTLE_TIMEOUT_MS = 5_000;
+
+/**
  * 滚轮事件发送的位置。参考项目固定在 (550, 650)（见 docs/limitations.md §6），
  * 这里保持一致，便于对照行为。视口比它小时 Playwright 仍会照发，不会报错。
  */
@@ -775,7 +789,13 @@ export function createPlaywrightSession(options: PlaywrightSessionOptions): Sess
     await guarded(() =>
       page.goto(url, { waitUntil: options.waitUntil, timeout: options.timeoutMs }),
     );
+    await waitForNetworkQuiet();
     return observe();
+  }
+
+  /** 见 `LOAD_SETTLE_TIMEOUT_MS`。超时与失败都吞掉：等不到就按时继续 */
+  async function waitForNetworkQuiet(): Promise<void> {
+    await page.waitForLoadState("networkidle", { timeout: LOAD_SETTLE_TIMEOUT_MS }).catch(() => undefined);
   }
 
   function currentUrl(): string {

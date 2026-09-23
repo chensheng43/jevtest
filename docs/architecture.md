@@ -88,6 +88,9 @@ POST /api/runs {caseIds: ["wikipedia-godel"]}
               │    ③ 映射回真实 Action  <- 此后模型输出不再有影响力
               │    校验失败 -> InvalidDecision，**不执行任何动作**
               │
+              ├─ policy.overrideWeakBlocked()
+              │    BLOCKED 没过半（< 0.5）-> 改走概率最大的非终止操作（每次运行至多 3 次，见 D20）
+              │
               ├─ 若 operation 是 DONE / BLOCKED：
               │    复查页面新鲜度 -> 结束为 done / blocked
               │
@@ -110,6 +113,7 @@ POST /api/runs {caseIds: ["wikipedia-godel"]}
               │    导航打断了也不影响上面那条记录
               │
               ├─ 无进展检测：连续 3 步 pageChanged=false 且非 wait -> blocked
+              │    （决策在执行前被丢弃的，另算：连续丢弃 3 次 -> blocked，见 §6.4）
               ├─ signal.throwIfAborted()            取消 -> cancelled
               │
               └─ 回到循环开始，直到终结状态
@@ -315,6 +319,10 @@ observation must not erase the action.*）
 ### 6.4 废弃的决策不产生副作用
 
 `fingerprint` 对不上就只重新观测，不执行。
+
+丢弃也有上限：自上一次成功执行以来**连续丢弃 `MAX_CONSECUTIVE_DISCARDS`（3）次**判为 `blocked`。
+丢弃的决策不产生 StepRecord，6.5 的无进展检测看不到它；而模型的请求里只有执行过的动作，
+它不知道上一次没点成，页面不变就会给出同一个答案。见 [decisions.md D21](decisions.md)。
 
 ### 6.5 无进展检测
 

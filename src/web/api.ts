@@ -28,6 +28,20 @@
  *
  *   GET  /api/queue                      队列状态（含 contextsActive，用于查泄漏）
  *
+ *   GET  /api/auth-states                登录态列表（只有摘要，绝不含 cookie 值）+ 各自被哪些用例引用
+ *   POST /api/auth-states                上传一份 storageState（没有图形界面时的兜底）
+ *   GET  /api/auth-states/:name
+ *   POST /api/auth-states/:name/verify   用这份登录态无头打开一个地址，看是否仍是登录状态
+ *   DELETE /api/auth-states/:name        被用例引用时需带 ?force=1
+ *
+ *   GET  /api/auth-window                登录窗口状态（null = 没开）
+ *   POST /api/auth-window                在本机桌面弹出有界面的浏览器（body: { name, url, overwrite? }）
+ *   POST /api/auth-window/save           导出登录态、落盘、关窗
+ *   POST /api/auth-window/cancel         关窗、不保存
+ *
+ * 登录窗口不挂在 `/api/auth-states/` 下：`login`、`import` 这类词本身就是合法的登录态名字，
+ * 挂在同一层会和 `:name` 撞路由。
+ *
  * 一条约定：**事件响应里绝不带截图 base64**，只带 `frame` 序号，
  * 前端另外请求 frames/:n.jpg。这条把单条事件从约 200KB 压到约 400B。
  */
@@ -45,6 +59,12 @@ import type { Settings } from "../config.ts";
 import { missingCredentials } from "../config.ts";
 import { admit } from "../browser/admission.ts";
 import type { BrowserPool } from "../browser/pool.ts";
+import { LoginBusy } from "../browser/login.ts";
+import type { LoginManager } from "../browser/login.ts";
+import { AuthStateNotFound, isValidAuthStateName, judgeLoggedIn, parseStorageState } from "../store/auth-states.ts";
+import type { AuthStateStore, AuthStateSummary, AuthVerifyResult } from "../store/auth-states.ts";
+import { GuardrailBlocked } from "../core/errors.ts";
+import { assertAllowedOrigin, loginRedirectHint } from "../core/guard.ts";
 import { listEngines } from "../engine/registry.ts";
 import type { RunnerService } from "../core/runner.ts";
 import { readIndex, readReport, toJUnit, toMarkdown } from "../core/report.ts";
@@ -63,6 +83,8 @@ export interface Services {
   runner: RunnerService;
   pool: BrowserPool;
   events: EventRouter;
+  authStates: AuthStateStore;
+  login: LoginManager;
 }
 
 export interface ApiDeps {
@@ -242,6 +264,14 @@ export async function handle(req: ApiRequest): Promise<ApiResponse> {
       return await handleRuns(req, segments, method);
     }
 
+    // ---- 登录态 -----------------------------------------------------------
+    if (segments[1] === "auth-states") {
+      return await handleAuthStates(req, segments, method);
+    }
+    if (segments[1] === "auth-window") {
+      return await handleAuthWindow(req, segments, method);
+    }
+
     return fail(404, `未知路径 ${path}`);
   } catch (error) {
     // 任何未预期的异常都变成结构化响应：一个坏请求不该让服务进程倒下，
@@ -380,16 +410,43 @@ async function admitCase(caseId: string): Promise<ApiResponse> {
       : fail(400, "用例校验失败", detail);
   }
 
+  if (caseDef.authState !== undefined && !(await services.authStates.exists(caseDef.authState))) {
+    return fail(
+      400,
+      `用例引用的登录态 ${caseDef.authState} 不存在：到「登录态」页登录一次，或在用例里换一个`,
+      { authState: caseDef.authState },
+    );
+  }
+
   try {
-    const report: AdmissionReport = await services.pool.withSession(
-      // 准入探测不需要 trace：它是随手点一下的动作，落一份 trace.zip 只是垃圾。
-      { tracing: false },
+    const result = await services.pool.withSession(
+      {
+        // 准入探测不需要 trace：它是随手点一下的动作，落一份 trace.zip 只是垃圾。
+        tracing: false,
+        // 必须与真实运行带同一份登录态：否则探测的是登录页，报出来的「密码框」之类的
+        // 警告全是登录页的，和用例真正要测的页面无关。
+        ...(caseDef.authState === undefined
+          ? {}
+          : { storageStatePath: services.authStates.pathOf(caseDef.authState) }),
+      },
       async (session) => {
         await session.goto(caseDef.startUrl, { waitUntil: "domcontentloaded" });
-        return admit(await session.probe(), caseDef);
+        const report: AdmissionReport = admit(await session.probe(), caseDef);
+        return { report, finalUrl: session.currentUrl() };
       },
     );
-    return ok(report);
+    const { report, finalUrl } = result;
+    // 一打开就被跳出白名单：真实运行会在第 0 步以 guardrail_blocked 结束。
+    // 这比任何页面特征都更致命，所以列为 blocking，并说清下一步该做什么。
+    const redirectedTo = outsideWhitelist(caseDef, finalUrl) ? finalUrl : null;
+    if (redirectedTo !== null) {
+      report.blocking.unshift(
+        `打开 startUrl 后被跳到了白名单之外（${redirectedTo}），运行会在第 0 步被拦下。` +
+          loginRedirectHint(caseDef.authState),
+      );
+      report.ok = false;
+    }
+    return ok({ ...report, redirectedTo });
   } catch (error) {
     return fail(
       502,
@@ -515,6 +572,242 @@ async function handleRuns(
       return fail(501, "JUnit 导出尚未实现（P1）。暂时用 format=md。");
     }
     return fail(400, `未知的 format：${format}（可选 md / junit）`);
+  }
+
+  return fail(404, `未知路径 ${req.path}`);
+}
+
+/** 白名单判定复用护栏本身的实现，免得两处对「越界」的理解不一致 */
+function outsideWhitelist(caseDef: Case, url: string): boolean {
+  try {
+    assertAllowedOrigin(caseDef, url);
+    return false;
+  } catch (error) {
+    if (error instanceof GuardrailBlocked) return true;
+    throw error;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 登录态
+// ---------------------------------------------------------------------------
+
+/**
+ * 上传 storageState 的请求体上限。控制类端点的 8KB 装不下一份登录态
+ * （几十个 cookie 加 localStorage 就过了），所以这一个端点单独放宽。
+ * 由 server.ts 的 `bodyLimitFor` 使用。
+ */
+export const AUTH_UPLOAD_MAX_BYTES = 1024 * 1024;
+
+/** 每份登录态被哪些用例引用。删除前的确认与列表页的「引用用例」列都靠它 */
+async function authStateUsage(): Promise<Map<string, { id: string; title: string }[]>> {
+  const { services } = requireDeps();
+  const usage = new Map<string, { id: string; title: string }[]>();
+  for (const summary of await services.store.list()) {
+    try {
+      const loaded = await services.store.read(summary.id);
+      const name = loaded.def.authState;
+      if (name === undefined) continue;
+      const list = usage.get(name) ?? [];
+      list.push({ id: summary.id, title: summary.title });
+      usage.set(name, list);
+    } catch {
+      // 读不了的用例在用例列表里自会暴露，这里不因为它让登录态页打不开
+    }
+  }
+  return usage;
+}
+
+function authFail(error: unknown): ApiResponse {
+  if (error instanceof AuthStateNotFound) return fail(404, error.message);
+  if (error instanceof LoginBusy) return fail(409, error.message);
+  return fail(400, error instanceof Error ? error.message : String(error));
+}
+
+function withUsage(
+  summary: AuthStateSummary,
+  usage: Map<string, { id: string; title: string }[]>,
+): AuthStateSummary & { usedBy: { id: string; title: string }[] } {
+  return { ...summary, usedBy: usage.get(summary.name) ?? [] };
+}
+
+function isHttpUrl(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+async function handleAuthStates(
+  req: ApiRequest,
+  segments: string[],
+  method: string,
+): Promise<ApiResponse> {
+  const { services } = requireDeps();
+  const authStates = services.authStates;
+
+  // GET /api/auth-states | POST /api/auth-states（上传）
+  if (segments.length === 2) {
+    if (method === "GET") {
+      const usage = await authStateUsage();
+      return ok((await authStates.list()).map((summary) => withUsage(summary, usage)));
+    }
+    if (method !== "POST") return fail(405, `${method} 不支持`);
+
+    const body = asRecord(req.body);
+    const name = body?.["name"];
+    if (typeof name !== "string" || !isValidAuthStateName(name)) {
+      return fail(400, "name 必须是小写字母、数字与连字符，需以字母或数字开头，长度 2~64");
+    }
+    const loginUrl = body?.["loginUrl"];
+    if (loginUrl !== undefined && loginUrl !== null && loginUrl !== "" && !isHttpUrl(loginUrl)) {
+      return fail(400, "loginUrl 必须是 http/https 的绝对地址");
+    }
+    if (body?.["overwrite"] !== true && (await authStates.exists(name))) {
+      return fail(409, `登录态 ${name} 已存在。要覆盖它，确认后再提交一次`, { exists: true });
+    }
+    try {
+      // 前端既可能传对象，也可能把用户粘进来的原文当字符串传
+      const raw = typeof body?.["state"] === "string" ? (JSON.parse(body["state"]) as unknown) : body?.["state"];
+      const summary = await authStates.save(name, parseStorageState(raw), {
+        loginUrl: isHttpUrl(loginUrl) ? loginUrl : null,
+        source: "import",
+      });
+      return ok(withUsage(summary, await authStateUsage()));
+    } catch (error) {
+      return fail(400, `上传的登录态无法使用：${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  const name = segments[2] ?? "";
+  if (!isValidAuthStateName(name)) return fail(400, `非法的登录态名称：${name}`);
+
+  // GET /api/auth-states/:name
+  if (segments.length === 3 && method === "GET") {
+    try {
+      return ok(withUsage(await authStates.get(name), await authStateUsage()));
+    } catch (error) {
+      return authFail(error);
+    }
+  }
+
+  // DELETE /api/auth-states/:name
+  if (segments.length === 3 && method === "DELETE") {
+    const usedBy = (await authStateUsage()).get(name) ?? [];
+    if (usedBy.length > 0 && req.query.get("force") !== "1") {
+      // 删掉仍被引用的登录态，那些用例下次运行会直接报「读不到登录态文件」。
+      // 不是禁止，而是要调用方明确知道后果再来一次。
+      return fail(409, `登录态 ${name} 仍被 ${usedBy.length} 个用例引用，删除后它们会运行失败`, { usedBy });
+    }
+    try {
+      await authStates.remove(name);
+      return { status: 204, body: null };
+    } catch (error) {
+      return authFail(error);
+    }
+  }
+
+  // POST /api/auth-states/:name/verify
+  if (segments.length === 4 && segments[3] === "verify" && method === "POST") {
+    let summary: AuthStateSummary;
+    try {
+      summary = await authStates.get(name);
+    } catch (error) {
+      return authFail(error);
+    }
+    const requested = asRecord(req.body)?.["url"];
+    const url = isHttpUrl(requested) ? requested : summary.loginUrl;
+    if (url === null) return fail(400, "这份登录态没有记录登录地址，验证时需要给出 url");
+    const result = await verifyAuthState(name, url);
+    await authStates.recordVerify(name, result);
+    return ok(result);
+  }
+
+  return fail(404, `未知路径 ${req.path}`);
+}
+
+/**
+ * 验证：带着登录态无头打开 `url`，看页面是否「还是登录状态」。不调用模型、不花钱。
+ * 判据见 `judgeLoggedIn`。
+ */
+async function verifyAuthState(name: string, url: string): Promise<AuthVerifyResult> {
+  const { services } = requireDeps();
+  const at = new Date().toISOString();
+  try {
+    const { finalUrl, passwordFields } = await services.pool.withSession(
+      { tracing: false, storageStatePath: services.authStates.pathOf(name) },
+      async (session) => {
+        await session.goto(url, { waitUntil: "domcontentloaded" });
+        const stats = await session.probe();
+        return { finalUrl: session.currentUrl(), passwordFields: stats.passwordFields };
+      },
+    );
+    return { at, url, finalUrl, ...judgeLoggedIn(url, finalUrl, passwordFields) };
+  } catch (error) {
+    return {
+      at,
+      ok: false,
+      url,
+      finalUrl: null,
+      detail: `打不开 ${url}：${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+}
+
+async function handleAuthWindow(
+  req: ApiRequest,
+  segments: string[],
+  method: string,
+): Promise<ApiResponse> {
+  const { services } = requireDeps();
+  const { login, authStates } = services;
+
+  // GET /api/auth-window | POST /api/auth-window
+  if (segments.length === 2) {
+    if (method === "GET") return ok(login.status());
+    if (method !== "POST") return fail(405, `${method} 不支持`);
+
+    const body = asRecord(req.body);
+    const name = body?.["name"];
+    const url = body?.["url"];
+    if (typeof name !== "string" || !isValidAuthStateName(name)) {
+      return fail(400, "name 必须是小写字母、数字与连字符，需以字母或数字开头，长度 2~64");
+    }
+    if (!isHttpUrl(url)) return fail(400, "url 必须是 http/https 的绝对地址");
+    // 「新建」撞上已有名字要先确认；「重新登录」由前端带 overwrite: true。
+    // 在开窗之前查：让人登录完才告诉他名字冲突，白登录一次。
+    if (body?.["overwrite"] !== true && (await authStates.exists(name))) {
+      return fail(409, `登录态 ${name} 已存在。要重新登录覆盖它，请用列表里的「重新登录」`, { exists: true });
+    }
+    try {
+      return ok(await login.open(name, url));
+    } catch (error) {
+      if (error instanceof LoginBusy) return fail(409, error.message, { window: login.status() });
+      return fail(502, error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  // POST /api/auth-window/save
+  if (segments.length === 3 && segments[2] === "save" && method === "POST") {
+    try {
+      const captured = await login.capture();
+      const summary = await authStates.save(captured.name, captured.state, {
+        loginUrl: captured.url,
+        source: "login",
+      });
+      return ok(withUsage(summary, await authStateUsage()));
+    } catch (error) {
+      return fail(409, error instanceof Error ? error.message : String(error), { window: login.status() });
+    }
+  }
+
+  // POST /api/auth-window/cancel
+  if (segments.length === 3 && segments[2] === "cancel" && method === "POST") {
+    await login.cancel();
+    return ok(null);
   }
 
   return fail(404, `未知路径 ${req.path}`);

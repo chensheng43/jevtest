@@ -187,6 +187,11 @@ export interface CaseDefinition {
   mode?: CaseMode;
   /** 域名白名单。缺省由 startUrl 的 origin 推导 */
   allowedOrigins?: string[];
+  /**
+   * 登录态的**名字**（不是路径）。运行时从 `<JEVTEST_AUTH_DIR>/<名字>.json` 载入
+   * cookie 与 localStorage。缺省 = 以未登录的全新浏览器打开 startUrl
+   */
+  authState?: string;
   budget?: Partial<Budget>;
   guardrails?: Guardrail[];
   allowDefaultOverride?: boolean;
@@ -218,6 +223,8 @@ export interface Case {
   startUrl: string;
   mode: CaseMode;
   allowedOrigins: string[];
+  /** 没有默认值：缺省就是「不带登录态」，也因此不影响旧用例的 digest */
+  authState?: string;
   budget: Budget;
   guardrails: Guardrail[];
   allowDefaultOverride: boolean;
@@ -241,6 +248,12 @@ export interface CaseRevision {
 
 /** `docs/case-format.md` 的 id 规则：小写字母数字开头，其后可含连字符，总长 2~64。 */
 const ID_PATTERN = /^[a-z0-9][a-z0-9-]{1,63}$/;
+
+/**
+ * 登录态名称与用例 id 同一套规则。它会拼进磁盘路径（`<authDir>/<名字>.json`），
+ * 因此只收名字、不收路径：用例可以从 Web 端创建，收路径就等于让用例指向本机任意文件。
+ */
+export const AUTH_STATE_NAME_PATTERN = ID_PATTERN;
 
 /**
  * 只接受 http/https。
@@ -416,6 +429,10 @@ const caseObjectSchema = z.object({
   startUrl: z.string().refine(isHttpUrl, { message: "startUrl 必须是 http/https 的绝对地址" }),
   mode: z.enum(["interactive", "readonly"]).default("interactive"),
   allowedOrigins: z.array(originSchema).optional(),
+  authState: z
+    .string()
+    .regex(ID_PATTERN, "authState 是登录态的名字：小写字母、数字与连字符，需以字母或数字开头，长度 2~64")
+    .optional(),
   // ⚠️ 必须是 prefault 而不是 default：`.default({})` 会把 {} 原样返回、不走 schema 解析，
   // budget.maxModelCalls 随之变成 undefined——预算静默失效、成本无上限，且不报错。
   budget: budgetSchema.prefault({}),

@@ -219,7 +219,8 @@ export function createBrowserPool(options: PoolOptions): BrowserPool {
       await access(path);
     } catch (error) {
       throw new JevtestError(
-        `读不到登录态文件 ${path}。先用 saveStorageState() 导出一份，或检查配置里的路径`,
+        `读不到登录态文件 ${path}。到 Web 的「登录态」页登录或上传一份，` +
+          "或检查用例里 authState 的名字是否写对",
         { cause: error },
       );
     }

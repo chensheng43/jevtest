@@ -189,6 +189,7 @@ const PROBE_SETTINGS: Settings = {
   tracing: false,
   casesDir: "",
   runsDir: "",
+  authDir: "",
   defaultEngine: TYPESAFE_ENGINE_NAME,
 };
 

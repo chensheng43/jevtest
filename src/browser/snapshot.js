@@ -5,9 +5,13 @@
  * (https://github.com/browser-use/jev-ultrafast, MIT License, Copyright (c) 2026 Browser Use)
  * 详见 NOTICE。
  *
- * 相对原版只有两处改动：
+ * 相对原版只有三处改动：
  *   1. 全局缓存名 `window.__jevFast` -> `window.__jev`。
  *   2. 本文件头（原文无）。
+ *   3. 候选集收集时加一次 `elementFromPoint` 命中测试（行内标了 `jevtest:`）。
+ *      上游只在输入前测遮挡，于是被盖住的元素照样进候选集；模型选中它、输入前被拦下、
+ *      重新观测后它还在、模型再选它——一次真跑在弹窗里一个被滚动区裁掉的复选框上
+ *      这样空转了 16 次模型调用。
  * 其余逐字保留——包括变量命名风格，**这是刻意的**：
  * 上游若修复了可访问名解析或守卫语义，我们能直接 diff 而不必重新推导。
  *
@@ -23,8 +27,10 @@
  *      模型只能回传这个 id，永远看不到也写不出 CSS 选择器。
  *      节点被替换会拿到新身份，导航会重置缓存——这就是「陈旧」的定义。
  *
- *   2. **只暴露可见、可点、在视口内的元素**。`checkVisibility` 加几何判断，
- *      离屏元素直接不进候选集，模型不会浪费时间点一个点不到的东西。
+ *   2. **只暴露可见、可点、在视口内、未被遮挡的元素**。`checkVisibility` 加几何判断
+ *      加中心点命中测试，离屏或被盖住的元素直接不进候选集，模型不会浪费时间点一个点不到的东西。
+ *      命中测试与输入前那次（playwright-session.ts 的 resolveTargetInPage）是**同一条标准**：
+ *      这里排除的元素，输入前也一定会被拦下（除非页面在两者之间变了）。
  *
  *   3. **语义守卫**。`pageKey` 记录文档级状态（timeOrigin/href/滚动/视口/表单值），
  *      `guard` 记录单个元素的身份、可访问名、值与附近上下文文本。
@@ -95,6 +101,9 @@
     if (!safe(e) || !visible(e) || e.matches(':disabled') || e.closest('[aria-disabled="true"]')) continue;
     const r=e.getBoundingClientRect(), x=r.x+r.width/2, y=r.y+r.height/2, rname=role(e);
     if (!rname || r.width<=0 || r.height<=0 || x<0 || y<0 || x>=innerWidth || y>=innerHeight) continue;
+    // jevtest: 中心点被盖住（浮层、弹窗底栏、滚动容器裁掉）就点不到，不进候选集
+    const hit=document.elementFromPoint(x,y);
+    if (!hit || (hit!==e && !e.contains(hit))) continue;
     if (rname==='gridcell' && e.querySelector('button,[role="button"]')) continue;
     const base={node:identity(e),role:rname,label:name(e)||rname,
       rect:{x:r.x,y:r.y,w:r.width,h:r.height}};
