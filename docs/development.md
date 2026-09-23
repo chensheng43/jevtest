@@ -19,12 +19,12 @@ cp .env.example .env                 # 填 TYPESAFE_API_KEY
 
 运行时依赖刻意保持在少数几个：
 
-| 包 | `package.json` 声明 | 脚手架验证时解析到 | 用途 |
-| --- | --- | --- | --- |
-| `playwright` | `^1.49.0` | 1.63.0 | 浏览器层 |
-| `zod` | `^4.0.0` | 4.6.5 | schema 校验，前后端共享 |
-| `yaml` | `^2.6.0` | 2.9.1 | 用例文件 |
-| `bootstrap` | `^5.3.8` | 5.3.8 | **只在浏览器里跑**，走 `/vendor/` 直接引 |
+| 包 | 用途 |
+| --- | --- |
+| `playwright` | 浏览器层 |
+| `zod` | schema 校验与类型推导（只在 Node 侧） |
+| `yaml` | 用例文件 |
+| `bootstrap` | **只在浏览器里跑**，走 `/vendor/` 直接引 |
 
 `bootstrap` 是唯一一个不进 Node 进程的依赖：`index.html` 用
 `/vendor/bootstrap/dist/css/bootstrap.min.css` 直接从 `node_modules` 引它，
@@ -57,11 +57,6 @@ cp .env.example .env                 # 填 TYPESAFE_API_KEY
 `JEVTEST_WORKERS` 与 `JEVTEST_ENGINE_INFLIGHT` 为什么是两个而不是一个：
 前者的瓶颈是浏览器内存（每 context 约 80~150MB），后者是厂商侧限流。
 两者无关，绑成一个总闸会让其中一个白白闲置（见 `browser/pool.ts`）。
-
-> ⚠️ **`zod` 的 minor 版本是承重的。** 用例预算是否生效取决于 `.prefault()` 的行为
-> （见 §5.1），而声明写的是 `^4.0.0` 而非固定版本——全新安装可能解析到更高的 minor。
-> 升级 zod 之后**必须重跑那条 `budget.maxModelCalls === 40` 的断言**，
-> 否则预算静默失效、成本无上限。
 
 ---
 
@@ -145,10 +140,7 @@ const engine = createScriptedEngine({
 });
 ```
 
-这把参考项目 `tests/test_agent.py:77-95` 里
-`monkeypatch.setattr(model, "post_json", fake)` 的手法提升到了注册表层。
-差别很大：monkeypatch 只能测孤立单元，而这里
-**server + queue + pool + runner + checks 的全链路**都能被确定性地测试。
+为什么它比 monkeypatch 强，见 [architecture.md §3.4](architecture.md)。
 
 `src/browser/session.ts` 的 `Session` 接口是同一思路的另一半：
 `core/` 只依赖接口，不 import playwright，因此单元测试用 `FakeSession`
@@ -178,8 +170,8 @@ z.object({ budget: BudgetSchema.prefault({}) })
 **后果**：`budget.maxModelCalls` 变成 `undefined`，用例预算静默失效、
 **成本无上限**。这是会烧钱的那种 bug，而且不会报错。
 
-脚手架验证时解析到的是 zod 4.6.5，`.prefault()` 可用。注意 `package.json` 写的是
-`^4.0.0` 而非固定版本，因此升级 zod 后必须重跑这条断言。必须配套测试：
+`package.json` 写的是 `^4.0.0` 而非固定版本，全新安装可能解析到更高的 minor，
+因此**升级 zod 后必须重跑这条断言**（在 `tests/schema.test.ts` 里）：
 
 ```ts
 assert.equal(CaseDefinitionSchema.parse({ 最小输入 }).budget.maxModelCalls, 40);
@@ -264,29 +256,7 @@ const next = await session.observe();     // 后
 
 ---
 
-## 7. 实现顺序建议
-
-**纵向切片，不是横向分层。**
-
-```text
-schema/case.ts
-  → browser/snapshot.js + session.ts + playwright-session.ts
-      里程碑：打开 Wikipedia 主页并打印元素表
-  → engine/types.ts + typesafe.ts + core/policy.ts
-      里程碑：跑一次决策，打印 operation 与概率分布
-  → core/agent.ts + checks.ts + report.ts
-      里程碑：完整跑完一个用例，CLI 输出报告 JSON
-  → 最后才是 web/
-```
-
-**先 CLI 后 Web。** CLI 跑通了，Web 层就只是薄薄的 I/O 与渲染；
-而且离线 e2e 测试可以在 Web 层存在之前就锁死 runner 的正确性。
-
-每个里程碑都应该是**可运行的**，而不是"写完了但还不能跑"。
-
----
-
-## 8. 修改 checklist
+## 7. 修改 checklist
 
 改完代码后：
 
@@ -310,7 +280,7 @@ npm run build && ls dist/browser/         # 动了资产就确认复制到位
 
 ---
 
-## 9. 尚待验证
+## 8. 尚待验证
 
 **权威列表在 [architecture.md §11](architecture.md)**——那里分三部分记录了
 接口层矛盾（§11.1，**已定案**）、通路与模块（§11.2，**已补齐**）

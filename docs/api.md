@@ -35,8 +35,7 @@ CLI 不经过 HTTP：`run` / `validate` / `import` 直接调用同一套模块�
 校验失败时，`detail` 里带 zod 的 **issue 路径**（如
 `assertions.final.controls.2.valueEquals`），前端据此高亮表单字段。
 
-> **服务端校验永远要重新跑一遍**，即使前端用同一份 schema 校验过。
-> 前端那份只是即时反馈，**不是信任边界**。
+> **服务端校验是唯一的信任边界。** 前端的必填标红只是即时反馈。
 
 ### 1.3 二进制端点
 
@@ -120,10 +119,8 @@ CLI 不经过 HTTP：`run` / `validate` / `import` 直接调用同一套模块�
 `POST /api/cases/:id/admit` **不运行用例、不调用模型**，只是一次只读的页面探测，
 所以可以在表单里做一个「检测页面」按钮随手点。
 
-> 用例的读写由 `src/store/cases.ts`（`CaseStore`）负责，落点见
-> [`architecture.md §11.2 ①`](architecture.md)。上表里的「文件落盘 / revision / slug 冲突」
-> 都由它实现——**这三条入口（表单、CLI、导入）最终都落到同一个 `write()`**，
-> 这是 D5「YAML 是唯一事实来源」真正被守住的地方。
+> 落盘、revision、id 冲突都由 `src/store/cases.ts` 的 `CaseStore` 实现，
+> 表单、CLI、导入三条入口最终落到同一个 `write()`（[`architecture.md §11.2 ①`](architecture.md)）。
 
 ### 3.3 运行
 
@@ -193,13 +190,7 @@ switch 分支与 `schema/events.ts` 的判别联合一一对应。
 | 路径 | 说明 |
 | --- | --- |
 | `/` 及静态资源 | `src/web/public/`，原生 HTML/CSS/JS。读取时把 `__JEVTEST_TOKEN__` 占位符替换为真实令牌 |
-| `/vendor/*` | 动态文件服务，从 `node_modules` 取前端资产：原先只为把 zod 喂给浏览器做表单即时校验，D18 之后同时供 Bootstrap 的样式表。**是全项目唯一的目录穿越风险点**，必须校验解析后的前缀在允许目录内且只放行 `.js` / `.map` / `.json` / `.css` |
-
-> `/vendor/*` 的收益与风险值得重新算账：它存在的理由只是省掉前端一份很薄的校验，
-> 而那份校验**本来就不是信任边界**（见 §1.2）。D18 之后它服务的东西变多了
-> （多了 Bootstrap 的 CSS），但风险面没有质变——仍然只读静态文件，且放行的
-> 扩展名里没有会被执行或会被注入令牌的那几种。见
-> [`security.md`](security.md) 的「已知攻击面与残余风险」。
+| `/vendor/*` | 从 `node_modules` 取前端资产，目前只有 Bootstrap 的样式表（D18）。**是全项目唯一的目录穿越风险点**，必须校验解析后的前缀在允许目录内且只放行 `.js` / `.map` / `.json` / `.css`。风险评估见 [`security.md` §5](security.md) |
 
 ---
 

@@ -9,16 +9,6 @@
 输出侧的对称文档是 [`report-format.md`](report-format.md)——那是运行产出物的权威定义。
 本文管**输入**（你写什么 YAML），它管**输出**（你读出什么 JSON）。
 
-> **为什么没有 `engineOptions`：** 曾经设计过一个自由形态的
-> `engineOptions: Record<string, unknown>` 用来给 `scripted` 测试引擎传答案序列，
-> **已决定不采用**。理由：用例是给用户写的，用户不该在 YAML 里看到「答案序列」
-> 这种测试脚手架；而且往「YAML 是唯一事实来源」里加自由形态字段，要穿过 YAML 往返、
-> 冻结用例快照、`caseDigest` 三关，代价与收益不成比例。
->
-> 测试引擎改走 `RunnerDeps.createEngine` 注入（那本来就是现成的注入点），
-> **生产用例永不声明 `engine: scripted`**。详见
-> [architecture.md §11.1 ④](architecture.md)。
-
 ---
 
 ## 顶层字段
@@ -63,10 +53,8 @@
 `{button, checkbox, radio, switch, combobox, menuitem, menuitemradio, menuitemcheckbox, option, gridcell}`
 的 click。
 
-后四个（ARIA 的选项、菜单单/复选项，以及日历与表格的可选单元格）不在最初的设计清单里，
-是**实践补上的**：它们的点击同样会改变被提交的值，少列一个，只读用例就能悄悄改掉页面状态，
-而报告里那句「本运行不可能发生变更」就变成了假话。清单的权威定义在
-`src/core/policy.ts` 的 `READONLY_BLOCKED_CLICK_ROLES`，改它必须同步改本文。
+清单的权威定义在 `src/core/policy.ts` 的 `READONLY_BLOCKED_CLICK_ROLES`，改它必须同步改本文
+（`tests/policy.test.ts` 会比对）。后四个为什么也要剔除，见 [`decisions.md` D17](decisions.md)。
 
 刻意**不**剔除的：`link`（导航）、`tab`（切换可见面板，等同导航）、
 `textbox` / `searchbox` / `spinbutton`（点击只是聚焦；输入才是变更，而输入走 `fill` 那条路径）。
@@ -293,12 +281,10 @@ assertions:
 目前 `skipped` 的唯一来源是引擎的概率分布为 `degenerate` 时的概率类检查。
 
 `AssertionResult.passed` 因而是 **`boolean | null`**：
-有失败 → `false`；无失败但有跳过 → **`null`（未判定）**；全通过 → `true`。
-聚合规则见 [architecture.md §11.1 ⑤](architecture.md)。
+有失败 → `false`；无失败但有跳过 → **`null`（未判定）**；全通过 → `true`
+（[`report-format.md` §2.6](report-format.md)）。
 
-**报告里必须把 `skipped` 显示为「跳过」，绝不能显示为「通过」。**
-把 `skipped` 当 `passed` 会让报告谎报覆盖——比直接失败更危险，
-因为它让人以为测过了而实际没有。
+**报告里必须把 `skipped` 显示为「跳过」，绝不能显示为「通过」**（[`decisions.md` D9](decisions.md)）。
 
 ### 常见组合
 

@@ -243,7 +243,7 @@ TypeSafe 给出真实概率分布；通用 LLM 通常只回一个选择，合成
 
 | 验证 | 结果 |
 | --- | --- |
-| `npx tsc --noEmit` | **0 错误**（`docs/development.md §8` 的硬要求） |
+| `npx tsc --noEmit` | **0 错误**（`docs/development.md §7` 的硬要求） |
 | `npm test` | **486 / 486**（476 离线 + 10 真浏览器 e2e，零付费调用、零外网） |
 | `node --check src/browser/snapshot.js` | 通过 |
 | `jevtest doctor` | 9 项检查：8 通过 / 1 警告（文本模型未配置）/ 0 失败 |

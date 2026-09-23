@@ -10,10 +10,7 @@ npm test
 ## 硬性要求
 
 **任何测试都不得调用付费 API。** 这靠 `scripted` 引擎实现
-（见 `src/engine/scripted.ts`），它把参考项目
-`tests/test_agent.py:77-95` 里 `monkeypatch.setattr(model, "post_json", fake)`
-的手法提升到注册表层——于是 server、queue、pool、runner、checks 的**全链路**
-都能在零成本、完全确定的条件下被测试，而不只是孤立的单元。
+（`src/engine/scripted.ts`，设计见 [architecture.md §3.4](../docs/architecture.md)）。
 
 同理，除 `tests/e2e/` 外不应启动浏览器；`tests/e2e/` 里的用例用本地 fixture 站点
 （见 `fixtures/site/`），不访问外网。外网的 Wikipedia 用例只有显式设置
@@ -66,17 +63,8 @@ npm run walkthrough     # 自己起服务、自己收摊，用临时用例库，
 
 ### 1. zod v4 的 `.default({})` 不解析默认值
 
-```ts
-// 错误写法：budget 会是 {}，嵌套默认值全部丢失
-z.object({ budget: BudgetSchema.default({}) })
-
-// 正确写法：.prefault 是 input-side 默认，会走 schema 解析
-z.object({ budget: BudgetSchema.prefault({}) })
-```
-
-直接后果是 `budget.maxModelCalls` 变成 `undefined`，**用例预算静默失效、成本无上限**。
-这是会真金白银踩坑的地方，`schema.test.ts` 里的那条断言必须存在。
-（已确认锁定的 zod 版本是 4.6.5，`.prefault()` 可用。）
+用错会让**用例预算静默失效、成本无上限**。`schema.test.ts` 里那条
+`budget.maxModelCalls === 40` 的断言必须存在。详见 [development.md §5.1](../docs/development.md)。
 
 ### 2. `skipped` 不是 `passed`
 

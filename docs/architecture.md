@@ -241,14 +241,8 @@ buildActionSpace(actions, { mode: "readonly" })
 [`case-format.md` §mode](case-format.md#关于-mode) 必须一致。
 
 于是 `operation` 问题的 criteria 里根本没有这些选项，**模型物理上无法选中**。
+为什么不做成「模型选了之后我们拒绝」，见 [`decisions.md` D10](decisions.md)。
 
-这比「模型选了之后我们拒绝」强得多，因为：
-
-- 不消耗模型注意力在一个不可能被批准的选项上；
-- 不存在「拒绝逻辑写漏一个 case」的可能；
-- 报告里可以直接说「本运行不可能发生变更」而不是「我们相信它没发生」。
-
-这是参考项目「有限选择空间即安全边界」这一核心机制最有价值的复用。
 `core/guard.ts` 的 `auditTrajectory` 仍会事后核对一遍——**「物理上不可能」
 和「报告需要证据」是两回事**。
 
@@ -259,11 +253,7 @@ status: RunStatus;        // 循环如何结束
 passed: boolean | null;   // 断言判决
 ```
 
-`status: "done"` 且 `passed: false` 是完全正常的组合。
-
-这不是洁癖。参考项目明确写下「A DONE choice is not proof of success」，
-并在 `examples/flights.py` 里用独立的 `verify()` 检验结果而不是相信模型的 DONE。
-本项目把这条纪律固化到了类型层面——两者的类型不同，写错编译器就会拦下。
+`status: "done"` 且 `passed: false` 是完全正常的组合。理由见 [`decisions.md` D8](decisions.md)。
 
 `passed` 允许为 `null`：预算在第一步之前就耗尽时，没有最终页面可供断言，
 此时是「未能求值」而不是「失败」。
@@ -280,10 +270,7 @@ TypeSafe 给出真实的概率分布。但多数通用 LLM 只回一个选择，
 
 - `Answer.distribution` 是必填字段；
 - 断言层看到 `degenerate` 时，概率类检查返回 **`skipped`**；
-- 报告里显示「跳过」，**绝不显示「通过」**。
-
-断言结果因此有三种状态。把 `skipped` 当 `passed` 会让报告谎报覆盖——
-比直接失败更危险，因为它让人以为测过了。
+- 报告里显示「跳过」，**绝不显示「通过」**（[`decisions.md` D9](decisions.md)）。
 
 ---
 
@@ -411,26 +398,14 @@ Playwright 在页面导航时会抛 `Execution context was destroyed` / `Target 
 
 ## 8. Web 服务
 
-### 8.1 为什么是 `node:http` 而不是 Hono
+### 8.1 `node:http`，不用 Web 框架
 
-Hono 确实能把 SSE 从 15 行降到 3 行，但：
+理由见 [`decisions.md` D3](decisions.md)。路由集中在 `web/api.ts`，换框架只动两个文件。
 
-1. 引入两个依赖，而本项目运行时依赖刻意压在个位数（当时是 3 个，后来为前端引入了 `bootstrap`，见 [`decisions.md` D18](decisions.md)）；
-2. 它的 `streamSSE` 有在连接静默断开时挂起、`onAbort` 不触发的已知问题
-   （[honojs/hono#1902](https://github.com/honojs/hono/issues/1902)、
-   [#3540](https://github.com/honojs/hono/issues/3540)）；
-3. **本项目用轮询，本来就不需要 SSE**。
+### 8.2 轮询，不用 SSE
 
-为省几十行代码换来一个长期存在的失败面，不划算。
-这个决定是可低成本反悔的：路由都集中在 `web/api.ts`。
-
-### 8.2 为什么轮询而不是 SSE
-
-进度事件是服务端单向推送，一次运行约 10~20 步，500ms 轮询完全够用。
-SSE 会引入连接生命周期、心跳、断线重连、以及上面那两个框架 bug。
-
-事件模型本身是 SSE 兼容的——`seq` 语义天然对应 `Last-Event-ID`。
-真要换，只改 `web/events.ts` 与一个端点。
+前端每 500ms 拉一次 `GET /api/runs/:id/events?since=<seq>`，理由见 [`decisions.md` D4](decisions.md)。
+事件模型与 SSE 兼容（`seq` 对应 `Last-Event-ID`），真要换只改 `web/events.ts` 与一个端点。
 
 ### 8.3 三重安全守卫
 
@@ -451,8 +426,7 @@ SSE 会引入连接生命周期、心跳、断线重连、以及上面那两个�
 - **请求体流式限长**，不能先收完再判断大小——否则可以被塞爆内存。
 - **`/vendor/*` 是唯一的动态文件服务路径**，必须防目录穿越：
   解析后断言前缀在允许目录内，且只放行 `.js` / `.map` / `.json` / `.css`。
-  （这条路径原先只为把 zod 直接喂给浏览器做表单即时校验，D18 之后同时供
-  Bootstrap 的样式表——仍然只读静态文件，见 §9.2 与 [`decisions.md` D18](decisions.md)。）
+  目前它只供 Bootstrap 的样式表（[`decisions.md` D18](decisions.md)）。
 
 ### 8.4 事件里绝不带截图
 
@@ -473,15 +447,8 @@ SSE 会引入连接生命周期、心跳、断线重连、以及上面那两个�
   会把这份优势抹掉，还让进度转发要过 `postMessage`。
 - 不是独立进程：只买到崩溃隔离，而崩溃隔离靠 `try/catch` 加池重启已覆盖大半。
 
-**一个用例一个 `BrowserContext`**，这是换到 Playwright 换来的最大收益：
-
-| | 上游（Browser Harness） | 本项目（Playwright） |
-| --- | --- | --- |
-| profile | 共享用户 Chrome 的 profile | 每个 context 独立 |
-| cookie / localStorage | 用例之间互相污染 | 完全隔离 |
-| 并行 | 不可能 | 天然支持 |
-| 登录态 | 手动维护 | `storageState` 复用与重置 |
-| 单实例成本 | 新建标签页 | 约 50ms、80~150MB |
+**一个用例一个 `BrowserContext`**，这是换到 Playwright 换来的最大收益，
+与上游的对照见 [`decisions.md` D11](decisions.md)。
 
 ### 9.2 两道解耦的信号量
 
@@ -579,19 +546,9 @@ scripted 是测试专用引擎，而用例是给用户写的——用户不该�
 
 #### ⑤ `AssertionResult.passed` 的三态空洞
 
-**结论**：字段类型改为 **`boolean | null`**，聚合规则写在 `core/checks.ts`
-的 `aggregateChecks`：
-
-| 情况 | `passed` |
-| --- | --- |
-| 有任一 failed | `false` |
-| 无 failed，但有 skipped | **`null`（未判定）** |
-| 全部 passed | `true` |
-| 没有任何检查项 | `null` |
-
-中间那行是关键：7 条通过、1 条因 degenerate 被跳过时判 `null` 而非 `true`。
-判 `true` 就是 D9 要杜绝的谎报覆盖——我们确实没验证那一条。
-想要确定的结论，就不该用需要概率的断言。
+**结论**：字段类型为 **`boolean | null`**，聚合规则在 `core/checks.ts` 的 `aggregateChecks`，
+逐行含义见 [`report-format.md` §2.6](report-format.md)。关键是「无失败但有跳过」判 `null` 而非 `true`——
+判 `true` 就是 D9 要杜绝的谎报覆盖。想要确定的结论，就不该用需要概率的断言。
 
 #### ⑥ `admission` 字段曾经没有调用点
 
@@ -629,9 +586,6 @@ admit(stats, case)  -> AdmissionReport  （纯函数，可单元测试）
 | revision 从 `revisions/` 目录推导，**不维护计数器文件** | 计数器会漂移（写失败、手工删除、并发）；目录本身就是事实，少一个需要保持同步的东西 |
 | 并发用**乐观锁**（`expectedRevision`），不用文件锁 | 单进程单事件循环，真正的竞态来自两个 HTTP 请求，不是两个进程；且 Windows 上文件锁很难做对。冲突时明确报错，好过静默覆盖 |
 | 写入**必须原子**（临时文件 + rename） | 直接覆写时进程被杀会留下半截 YAML——而 `case.yaml` 是唯一事实来源，损坏它等于丢失这个用例 |
-
-与 runs 侧的不对称是有意的：报告落盘留在 `core/report.ts`，因为它要组装
-`steps` / `assertion` / `stats`，与运行生命周期紧密耦合；用例是纯 CRUD。
 
 #### ② 停机信号：两级 `AbortController` 合成
 
@@ -685,12 +639,8 @@ admit(stats, case)  -> AdmissionReport  （纯函数，可单元测试）
 最坏情况实际花费是预算的 3 倍而刹车不会响。成本控制按请求数算才成立——
 而且这与 `maxInputTokens` 的口径一致（它本来就数实际 token）。
 
-`RunStats` 因此有两个字段：
-
-| 字段 | 含义 | 用途 |
-| --- | --- | --- |
-| `modelCalls` | 实际 HTTP 请求数（**含重试**） | `budget.maxModelCalls` 与 `quality.maxModelCalls` 都按它算 |
-| `decisions` | 逻辑决策数（不含重试） | 只用于展示。`modelCalls - decisions` 就是重试造成的额外请求 |
+`RunStats` 因此同时有 `modelCalls`（实际请求数）与 `decisions`（逻辑决策数），
+两者的口径与用法见 [`report-format.md` §2.5](report-format.md)。
 
 「最多走几步」这件事由 `trajectory.maxSteps` 表达，不新增断言字段。
 
