@@ -33,6 +33,8 @@
 const TOKEN = document.querySelector('meta[name="jevtest-token"]')?.content ?? "";
 const TOKEN_HEADER = "x-jevtest-token";
 const POLL_MS = 500;
+/** 结果页连续这么多次既无事件也无报告，就判定这个运行不会再有进展、停止轮询 */
+const MAX_EMPTY_POLLS = 5;
 /** 运行历史默认渲染多少条。`GET /api/runs` 不分页，index.jsonl 会一直涨。 */
 const RUNS_PAGE = 50;
 /** 事件流最多留多少条 DOM 节点，避免长时间运行把页面撑大。 */
@@ -1965,14 +1967,33 @@ async function viewRun(app, runId) {
     tabbar.node,
   );
 
+  let report = null;
+  let finished = false;
+  let firstPoll = true;
+  /** 连续多少次「没事件、没报告、从没见过任何事件」——那是一个不会再有进展的运行 */
+  let emptyPolls = 0;
+
+  // 视图已被 route() 换掉：`app` 是这张视图自己的容器，换掉后就脱离了文档。
+  // 在途的请求回来之后必须就此停下——否则它会继续往脱离的 DOM 里写，
+  // 还会把新视图的 pollTimer 覆盖掉，让旧运行在后台一直轮询下去。
+  const gone = () => !app.isConnected;
+
   const poll = async () => {
     try {
       const events = await call(`/api/runs/${runId}/events?since=${lastSeq}`);
+      if (gone()) return;
       for (const event of events) {
         lastSeq = Math.max(lastSeq, event.seq);
         appendEvent(eventList, event);
+        if (event.type === "run.finished") finished = true;
       }
-      const report = await call(`/api/runs/${runId}`).catch(() => null);
+      // 报告要到运行结束、落盘之后才有：运行中每次都去拉只会得到 404。
+      // 只在首次（可能是一次早已结束的运行）与收到 run.finished 时拉。
+      if (firstPoll || finished) {
+        report = await call(`/api/runs/${runId}`).catch(() => null);
+        if (gone()) return;
+      }
+      firstPoll = false;
       if (report !== null) {
         banner.replaceChildren(reportHeader(report));
         stepTable.replaceChildren(...report.steps.map((step) => stepRow(step, report.runId)));
@@ -1981,14 +2002,26 @@ async function viewRun(app, runId) {
       }
       refreshEventPlaceholder(eventList, report);
 
-      const live = report === null || report.status === "queued" || report.status === "running";
+      const live = !finished && (report === null || report.status === "queued" || report.status === "running");
       // 运行中默认看事件（此刻用户关心的是「在干什么」），结束后默认看断言
       // （此刻关心的是「结果是什么」）。用户自己点过之后就不再替他切换。
       if (!userChoseTab) tabbar.select(live ? "events" : "assertions");
       tabbar.setBadge("events", live ? "●" : null);
 
+      emptyPolls = report === null && lastSeq === 0 ? emptyPolls + 1 : 0;
+      if (emptyPolls >= MAX_EMPTY_POLLS) {
+        // 没有报告、也从没收到过任何事件：id 不存在，或服务重启前还在排队的运行。
+        // 它不会再有进展，继续轮询只是白白发请求。
+        tabbar.setBadge("events", null);
+        banner.replaceChildren(el("div", {
+          class: "alert alert-warning",
+          text: "找不到这个运行的报告或进度：id 可能不存在，或它在服务重启前还没跑完。已停止刷新。",
+        }));
+        return;
+      }
       if (live) pollTimer = setTimeout(poll, POLL_MS);
     } catch (error) {
+      if (gone()) return;
       pollTimer = setTimeout(poll, POLL_MS * 4);
       eventList.append(el("li", { class: "alert alert-danger", text: `拉取失败：${error.message}` }));
     }
@@ -2379,7 +2412,7 @@ let leaveGuard = null;
 let lastHash = location.hash;
 
 async function route() {
-  const app = document.getElementById("app");
+  const root = document.getElementById("app");
   const target = location.hash;
   if (leaveGuard !== null && target !== lastHash && !leaveGuard()) {
     history.replaceState(null, "", lastHash);
@@ -2389,7 +2422,12 @@ async function route() {
   leaveGuard = null;
   lastHash = target;
 
-  app.replaceChildren(skeleton());
+  // 每个视图渲染进**自己的**容器。上一张视图还在途的异步代码（轮询、慢请求）
+  // 回来时写的是它自己那个已经脱离文档的容器，不会盖掉这一张——
+  // 快速连点两个链接时，后返回的旧视图不再覆盖新视图。
+  const slot = el("div", {}, [skeleton()]);
+  root.replaceChildren(slot);
+  const app = slot;
   clearTimeout(pollTimer);
   const hash = target.replace(/^#\/?/, "");
   const [head, id] = hash.split("/");
@@ -2405,7 +2443,7 @@ async function route() {
     else if (head === "run" && id) await viewRun(app, id);
     else app.replaceChildren(pageHead("未知路由"), el("p", { text: `#/${hash}` }));
   } catch (error) {
-    app.replaceChildren(pageHead("出错了"), errorBox(error));
+    if (slot.isConnected) app.replaceChildren(pageHead("出错了"), errorBox(error));
   }
 }
 
