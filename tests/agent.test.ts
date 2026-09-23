@@ -453,6 +453,32 @@ test("取消：在步边界生效，已经开始的那次浏览器变更会做�
   assert.match(report.failureReason ?? "", /取消/);
 });
 
+test("取消：落在等模型响应时，同样以 cancelled 正常返回并照常求值断言", async () => {
+  // 真实引擎收到 abort 会立刻中断 fetch 并抛出。此前这个异常冒到 runner，
+  // 报告的断言、准入、最终 URL 全是 null——而取消最常发生的恰恰就是这个时刻。
+  const controller = new AbortController();
+  const session = new FakeSession({ observations: [richPage({ fingerprint: "fp-0" })] });
+  const inner = createScriptedEngine({ steps: constantSteps(clickLink(), 3) });
+  const engine: DecisionEngine = {
+    ...inner,
+    name: inner.name,
+    capabilities: inner.capabilities,
+    decide: (_req, signal) => {
+      controller.abort();
+      signal.throwIfAborted();
+      return Promise.reject(new Error("unreachable"));
+    },
+  };
+
+  const { report } = await runCase({ caseDef: makeCase(), session, engine, signal: controller.signal });
+
+  assert.equal(report.status, "cancelled");
+  assert.equal(session.actCount, 0, "输入还没发出");
+  assert.notEqual(report.assertion, null, "页面已经观测到了：断言照常求值");
+  assert.notEqual(report.admission, null, "准入也已采集");
+  assert.match(report.failureReason ?? "", /取消/);
+});
+
 test("取消：首个步边界之前就中止时不打开页面，也不产生断言结论", async () => {
   const controller = new AbortController();
   controller.abort();

@@ -87,6 +87,10 @@ import { buildReport } from "./report.ts";
 /** 连续多少步无进展判为 blocked。用例可用 trajectory.maxIdenticalConsecutive 覆盖。 */
 export const DEFAULT_NO_PROGRESS_LIMIT = 3;
 
+/** 在等模型响应时被取消。runner 会按「用户取消 / 进程停机」改写成对应的原因。 */
+const CANCELLED_WHILE_WAITING_ENGINE =
+  "用户取消：在等待模型响应时停止（这一步的输入尚未发出，浏览器状态完整）";
+
 export interface AgentDeps {
   session: Session;
   engine: DecisionEngine;
@@ -267,7 +271,20 @@ export class CaseAgent {
         history: [...this.history],
         budget: budget.view(),
       });
-      const decision = await engine.decide(request, signal);
+      let decision: DecisionResult;
+      try {
+        decision = await engine.decide(request, signal);
+      } catch (error) {
+        // 取消大多恰好落在这里（等模型是一步里最久的阶段），而引擎会立刻中断 fetch 并抛出。
+        // 此时浏览器还没收到这一步的任何输入，与步边界取消是同一种情况：以 cancelled
+        // 正常返回，照常求值断言——而不是让异常冒到 runner、报告里断言与准入全空（§6.6）。
+        if (signal.aborted) {
+          this.status = "cancelled";
+          failureReason = CANCELLED_WHILE_WAITING_ENGINE;
+          break loop;
+        }
+        throw error;
+      }
       // RunStats 的唯一持有者是 BudgetMeter——这里绝不另开计数器。
       // 两个方法的分工见 budget.ts：decisions 记逻辑决策，modelCalls 按
       // `usage.requests` 累加（重试会使其大于 1，重试因此不是免费通道）。
@@ -378,7 +395,18 @@ export class CaseAgent {
           this.page = await this.observeOnce();
           continue loop;
         }
-        const generated = await this.writeText(resolved.action, page, signal);
+        let generated: { text: string; textEngine: string | null; textLatencyMs: number };
+        try {
+          generated = await this.writeText(resolved.action, page, signal);
+        } catch (error) {
+          // 同 decide：文本还没生成，输入还没发出，取消在这里等价于步边界取消
+          if (signal.aborted) {
+            this.status = "cancelled";
+            failureReason = CANCELLED_WHILE_WAITING_ENGINE;
+            break loop;
+          }
+          throw error;
+        }
         text = generated.text;
         textEngine = generated.textEngine;
         textLatencyMs = generated.textLatencyMs;
