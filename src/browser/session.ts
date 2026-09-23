@@ -57,6 +57,12 @@ export interface Observation {
   actions: Action[];
   /** 因超出上限被丢弃的候选数。模型据此知道「还有东西没看到」 */
   omittedActions: number;
+  /**
+   * 当前可见的页面提示（toast / alert / 表单校验），每条已压成一行。
+   * 文字同样在 `text` 里，单独给出是为了让模型与报告不必在几千字里找它——
+   * 一条「请输入SKU」埋在正文中间时，模型分不清它和同名的输入框占位符。
+   */
+  notices: string[];
 
   /** 整页语义标记。用于 wait / scroll / fill 等动作的新鲜度比较 */
   marker: unknown;

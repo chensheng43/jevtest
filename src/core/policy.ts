@@ -20,7 +20,15 @@
 
 import type { Case, CaseMode } from "../schema/case.ts";
 import type { ActionKind, Operation } from "../schema/events.ts";
-import type { Answer, BudgetView, DecisionRequest, DecisionResult, ElementIR, Question } from "../engine/types.ts";
+import type {
+  Answer,
+  BudgetView,
+  DecisionRequest,
+  DecisionResult,
+  ElementIR,
+  Question,
+  RecentActionIR,
+} from "../engine/types.ts";
 import type { Action, Observation } from "../browser/session.ts";
 import type { StepRecord } from "../schema/report.ts";
 import { InvalidDecision } from "./errors.ts";
@@ -131,9 +139,16 @@ export interface Resolved {
  *
  * `mode: "readonly"` 时，`fill`/`select` 动作与变更型 click 在此被剔除，
  * 因此 `targets` 里**根本不会有 TYPE_TEXT / SELECT 键**。
+ *
+ * `ineffectiveClicks` 里的节点不提供 CLICK（输入、选择照旧）：它们刚被点过而页面纹丝不动。
+ * 同样是构造期剔除，理由见 agent.ts 的 `ineffectiveClicks`。
  */
-export function buildActionSpace(actions: Action[], opts: { mode: CaseMode }): ActionSpace {
+export function buildActionSpace(
+  actions: Action[],
+  opts: { mode: CaseMode; ineffectiveClicks?: ReadonlySet<number> },
+): ActionSpace {
   const readonly = opts.mode === "readonly";
+  const ineffectiveClicks = opts.ineffectiveClicks ?? new Set<number>();
   const drafts = new Map<number, Action[]>();
   const controls: Record<string, Action> = {};
 
@@ -173,8 +188,14 @@ export function buildActionSpace(actions: Action[], opts: { mode: CaseMode }): A
   };
 
   let nextIndex = 0;
-  for (const bucket of drafts.values()) {
-    const element = buildIndexedElement(bucket, String(nextIndex + 1), readonly, targetHead);
+  for (const [node, bucket] of drafts) {
+    const element = buildIndexedElement(
+      bucket,
+      String(nextIndex + 1),
+      readonly,
+      ineffectiveClicks.has(node),
+      targetHead,
+    );
     // 一个什么操作都做不了的节点不进元素表：它只会占模型注意力与上下文，
     // 而模型对它的任何选择都会被 validateChoice 拒掉（它不在候选集里）。
     if (element === null) continue;
@@ -203,13 +224,15 @@ function buildIndexedElement(
   bucket: Action[],
   index: string,
   readonly: boolean,
+  clickIneffective: boolean,
   targetHead: (operation: Operation) => Record<string, Action>,
 ): ElementIR | null {
   const click = bucket.find((action) => action.kind === "click");
   const fill = bucket.find((action) => action.kind === "fill");
   const selects = bucket.filter((action) => action.kind === "select");
 
-  const clickAllowed = click !== undefined && !(readonly && blocksClickInReadonly(click));
+  const clickAllowed =
+    click !== undefined && !clickIneffective && !(readonly && blocksClickInReadonly(click));
   const fillAllowed = fill !== undefined && !readonly;
   // 原生下拉的每个未被选中的 option 都是一条 select 动作；全都被选中或禁用时为空，
   // 此时这个元素没有任何 SELECT 目标，只读模式下也就什么都不剩。
@@ -352,19 +375,29 @@ export function buildDecisionRequest(input: {
       title: page.title,
       text: page.text,
       textTruncated: page.textTruncated,
+      notices: page.notices,
       elements: space.elements,
-      recentActions: history.slice(-RECENT_ACTIONS).map((step) => ({
-        action: step.action,
-        kind: step.kind,
-        text: step.text,
-        pageChanged: step.pageChanged,
-      })),
+      recentActions: recentActions(history),
       omittedActions: page.omittedActions,
     },
     // budget 原样带上：引擎据此自行裁剪上下文，runner 不必猜它还剩多少额度。
     questions: buildQuestions(space),
     budget,
   };
+}
+
+/**
+ * 最近的若干步，供决策请求与文本取值参考（参考项目 model.py:113 取 10 条）。
+ * 两处共用这一个函数：各拼一份的话，给其中一处加字段（例如 notices）时另一处会被漏掉。
+ */
+export function recentActions(history: StepRecord[]): RecentActionIR[] {
+  return history.slice(-RECENT_ACTIONS).map((step) => ({
+    action: step.action,
+    kind: step.kind,
+    text: step.text,
+    pageChanged: step.pageChanged,
+    ...(step.notices === undefined ? {} : { notices: step.notices }),
+  }));
 }
 
 /** 问题的 key。operation 恒为 `"operation"`，其余为 `<operation>_target` 小写。 */

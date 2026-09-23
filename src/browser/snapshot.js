@@ -5,7 +5,7 @@
  * (https://github.com/browser-use/jev-ultrafast, MIT License, Copyright (c) 2026 Browser Use)
  * 详见 NOTICE。
  *
- * 相对原版只有四处改动：
+ * 相对原版只有五处改动：
  *   1. 全局缓存名 `window.__jevFast` -> `window.__jev`。
  *   2. 本文件头（原文无）。
  *   3. 候选集收集时加一次 `elementFromPoint` 命中测试（行内标了 `jevtest:`）。
@@ -14,6 +14,8 @@
  *      这样空转了 16 次模型调用。
  *   4. 语义候选之后追加一轮 `cursor:pointer` 候选（行内标了 `jevtest:`）：
  *      没有 role 的 `<li>` / `<div>` 靠事件委托可点，上游看不见它们。
+ *   5. 额外返回 `notices`：当前可见的页面提示（toast / alert / 表单校验，行内标了 `jevtest:`）。
+ *      不进 marker——它的文字本来就在 text 里，新鲜度与指纹不因它另起一套判据。
  * 其余逐字保留——包括变量命名风格，**这是刻意的**：
  * 上游若修复了可访问名解析或守卫语义，我们能直接 diff 而不必重新推导。
  *
@@ -162,6 +164,30 @@
       words.push(value); length+=value.length;
     }
   }
+  // jevtest: 页面提示（toast、全局报错、表单校验）。它们也在上面的 text 里，但混在几千字当中、
+  // 与同名的占位符分不开：一次真跑里「请输入SKU」的 toast 弹了四次，模型次次仍点「确定」。
+  // 单独收出来给模型置顶。两类来源：
+  //   - 语义提示：role=alert/status、aria-live。只要求可见且有尺寸（读屏专用的 1px 区域不收）；
+  //   - 自造浮层：id/class 像提示、自身 fixed/absolute 定位、不是整宽横幅（整宽的多半是
+  //     常驻公告，每步都报只是噪音）。命中的实例是 `<div id="msg-mini" class="msgno">`。
+  // 只收最外层；过长的（>200 字）不是提示而是内容区，不收。
+  const notices=[], noticeTaken=[];
+  const noticeName=/toast|message|msg|notif|alert|snackbar/i;
+  for (const e of document.body.querySelectorAll('*')) {
+    if (noticeTaken.some(t=>t.contains(e))) continue;
+    const semantic=['alert','status'].includes(e.getAttribute('role')) ||
+      ['assertive','polite'].includes(e.getAttribute('aria-live'));
+    if (!semantic && !noticeName.test(e.id+' '+(typeof e.className==='string' ? e.className : ''))) continue;
+    if (!visible(e)) continue;
+    const r=e.getBoundingClientRect();
+    if (r.width<4 || r.height<4 || r.bottom<=0 || r.top>=innerHeight || r.right<=0 || r.left>=innerWidth) continue;
+    if (!semantic && (!['fixed','absolute'].includes(getComputedStyle(e).position) || r.width>=innerWidth*0.9)) continue;
+    const value=(e.innerText||'').replace(/\s+/g,' ').trim();
+    if (!value || value.length>200) continue;
+    noticeTaken.push(e);
+    if (!notices.includes(value)) notices.push(value);
+    if (notices.length>=5) break;
+  }
   const text=words.join('\n').slice(0,6000), height=document.documentElement.scrollHeight;
   const page_key=cache.pageKey(), guards={};
   for (const a of actions) if (!(a.node in guards)) guards[a.node]=cache.guard(cache.nodes.get(a.node));
@@ -176,5 +202,5 @@
   if (scrollY>0) actions.push({id:'scroll_up',kind:'scroll',label:'Scroll up',delta:-560});
   actions.push({id:'wait',kind:'wait',label:'Wait for the page to update'});
   return {url:location.href,title:document.title,w:innerWidth,h:innerHeight,text,
-    scroll:{y:scrollY,height},actions,marker,page_key,guards,omitted_actions};
+    scroll:{y:scrollY,height},actions,marker,page_key,guards,omitted_actions,notices};
 })()

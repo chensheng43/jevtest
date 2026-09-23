@@ -58,6 +58,11 @@ export interface StepRecord {
   urlAfter: string | null;
   /** null = 执行后观测失败（例如导航打断），不代表动作没发生 */
   pageChanged: boolean | null;
+  /**
+   * 执行后那次观测里可见的页面提示（toast / alert / 表单校验）。
+   * 观测失败时缺省（与 `pageChanged: null` 同一种「没看到」）；早于这个字段的报告里也没有它。
+   */
+  notices?: string[];
 
   engineLatencyMs: number;
   textLatencyMs: number;
@@ -272,6 +277,8 @@ const stepRecordSchema = z.object({
   urlAfter: z.string().nullable(),
   // 三态：null 是「没能观测」，不是「没变化」。缺了 nullable 会让正常导航的报告读不出来。
   pageChanged: z.boolean().nullable(),
+  // optional 而不是 nullable：老报告里没有这个字段，不能因为读旧物证而失败（同 finalFrame）
+  notices: z.array(z.string()).optional(),
   engineLatencyMs: z.number().nonnegative(),
   textLatencyMs: z.number().nonnegative(),
   observedMs: z.number().nonnegative(),

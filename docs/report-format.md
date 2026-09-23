@@ -86,6 +86,7 @@ runs/
 | 执行 | `executed` / `blockReason` | `executed: false` = **浏览器没收到任何输入**，被护栏拦下了 |
 | 输入 | `text` / `textEngine` | TYPE_TEXT 实际输入的文本；`textEngine` 为生成它的引擎名 |
 | 时序 | `urlBefore` / `urlAfter` / `pageChanged` / `observedMs` / `engineLatencyMs` / `textLatencyMs` | `pageChanged` 为 `null` = 执行后观测失败（例如导航打断），**不代表动作没发生** |
+| 提示 | `notices` | 执行后那次观测里可见的页面提示（toast / alert / 表单校验）。观测失败时缺省；早于这个字段的报告里没有它 |
 | 画面 | `frame` | **操作前画面**，对应 `frames/<n>.jpg`；未开启截图或截图失败为 `null` |
 | 成本 | `engineUsage` | 该步的 token / 金额 / 重试请求数 |
 

@@ -387,6 +387,14 @@ e2e("观测：没有 role、只靠 cursor:pointer 可点的菜单项也进候选
   });
 });
 
+e2e("观测：页面提示（toast / alert）单独收进 notices，常驻公告、读屏区域、已关的 toast 不收", async () => {
+  // 这条来自一次真跑：「请输入SKU」的 toast 混在几千字正文里、与同名占位符分不开，模型连点了四次「确定」。
+  await wiring.pool.withSession({ tracing: false }, async (session) => {
+    const page = await session.goto(`${fixture.url}/notices.html`, { waitUntil: "domcontentloaded" });
+    assert.deepEqual(page.notices, ["请输入SKU", "SKU 不能为空", "导入失败"]);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // 全链路：搜索流程
 // ---------------------------------------------------------------------------

@@ -71,6 +71,7 @@ function observation(actions: Action[], overrides: Partial<Observation> = {}): O
     scroll: { y: 0, height: 2000 },
     actions,
     omittedActions: 0,
+    notices: [],
     marker: null,
     pageKey: null,
     guards: {},
@@ -228,6 +229,23 @@ test("一个节点只拿一个索引，即使它同时可点可输入", () => {
   // 后者描述的是「点开这个字段」，不是这个字段叫什么（snapshot.js:117）。
   assert.equal(space.elements[1]?.label, "搜索");
   assert.equal(space.targets["CLICK"]?.["2"]?.label, "Open 搜索");
+});
+
+test("ineffectiveClicks：只收回该节点的 CLICK，输入保留；只剩 CLICK 的节点整行退出元素表", () => {
+  const actions = [click(1, "确定"), ...editable(2, "SKU", ""), click(3, "关闭")];
+  const space = buildActionSpace(actions, { mode: "interactive", ineffectiveClicks: new Set([1, 2]) });
+
+  assert.deepEqual(
+    space.elements.map((element) => [element.label, element.operations]),
+    [
+      ["SKU", ["TYPE_TEXT"]],
+      ["关闭", ["CLICK"]],
+    ],
+  );
+  // 索引照旧在可用元素上连续，不给被剔除的节点留空号
+  assert.deepEqual(Object.keys(space.targets["CLICK"] ?? {}), ["2"]);
+  assert.equal(space.targets["CLICK"]?.["2"]?.label, "关闭");
+  assert.equal(space.targets["TYPE_TEXT"]?.["1"]?.label, "SKU");
 });
 
 test("原生下拉的每个 option 是独立 target，key 形如 3:1", () => {
@@ -418,6 +436,22 @@ test("recentActions 取最后 10 条且保持时间顺序", () => {
     request.state.recentActions.map((recent) => recent.action),
     ["动作16", "动作17", "动作18", "动作19", "动作20", "动作21", "动作22", "动作23", "动作24", "动作25"],
   );
+});
+
+test("页面提示：当前页的 notices 与每一步之后的 notices 都进请求；老记录里没有就不带这个键", () => {
+  const actions = [click(1, "确定")];
+  const history = [{ ...step(1), notices: ["请输入SKU"] }, step(2)];
+  const request = buildDecisionRequest({
+    caseDef: mkCase(),
+    page: observation(actions, { notices: ["请输入SKU"] }),
+    space: buildActionSpace(actions, { mode: "interactive" }),
+    history,
+    budget: budgetView(),
+  });
+
+  assert.deepEqual(request.state.notices, ["请输入SKU"]);
+  assert.deepEqual(request.state.recentActions[0]?.notices, ["请输入SKU"]);
+  assert.equal("notices" in (request.state.recentActions[1] ?? {}), false);
 });
 
 test("goal、rules、omittedActions、budget 原样带上；omittedActions 口径来自观测", () => {

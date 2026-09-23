@@ -35,7 +35,7 @@
  */
 
 import type { BudgetView, DecisionEngine, DecisionRequest, DecisionResult, Option, Question, TextRequest, TextResult } from "./types.ts";
-import type { Answer } from "./types.ts";
+import type { Answer, RecentActionIR } from "./types.ts";
 import { attachFailedCallUsage } from "./types.ts";
 import type { Usage } from "../schema/report.ts";
 import { TEXT_VALUE } from "../core/rules.ts";
@@ -257,13 +257,13 @@ function buildDecisionBody(model: string, req: DecisionRequest): Record<string, 
       page: {
         url: req.state.url,
         title: req.state.title,
-        text: trimPageText(req.state.text, req.budget),
+        text: withNotices(req.state.notices, trimPageText(req.state.text, req.budget)),
       },
       // 元素表原样透传：它的字段名（index/label/role/operations/options）
       // 已经就是「给模型看的形状」，多一层改名只会多一处漂移的地方。
       elements: req.state.elements,
       recent_actions: req.state.recentActions.map((entry) => ({
-        action: entry.action,
+        action: actionWithNotices(entry),
         kind: entry.kind,
         text: entry.text,
         page_changed: entry.pageChanged,
@@ -275,6 +275,28 @@ function buildDecisionBody(model: string, req: DecisionRequest): Record<string, 
     // 多一个就是给一个严格校验的服务端多一个拒绝的理由，而它有且只有一个
     // 模糊的报错（Invalid request.），排查代价全在我们这一侧。
   };
+}
+
+/**
+ * 页面提示置顶。上游的 `state.page` 只有 url / title / text 三个键，而服务端对多余的键
+ * 只回一句 `Invalid request.`（见 buildDecisionBody 末尾），所以提示只能拼进 text。
+ * 放在最前面、不参与裁剪：它最短，也最可能解释「为什么上一步没成」。
+ */
+function withNotices(notices: string[], text: string): string {
+  if (notices.length === 0) return text;
+  return `Notices currently shown on the page (toasts / alerts / validation):\n${notices
+    .map((notice) => `- ${notice}`)
+    .join("\n")}\n\nPage text:\n${text}`;
+}
+
+/**
+ * 近期动作的 `action` 串，带上这一步之后弹出的提示。理由同 `withNotices`：
+ * `recent_actions` 的每项只认 action / kind / text / page_changed 四个键。
+ */
+function actionWithNotices(entry: RecentActionIR): string {
+  const notices = entry.notices ?? [];
+  if (notices.length === 0) return entry.action;
+  return `${entry.action} (afterwards the page showed: ${notices.join(" | ")})`;
 }
 
 /**
@@ -857,7 +879,7 @@ function buildTextUserMessage(req: TextRequest): string {
     lines.push("", "Recent actions (oldest first):");
     req.recentActions.forEach((entry, i) => {
       const changed = entry.pageChanged === null ? "unknown" : entry.pageChanged ? "yes" : "no";
-      lines.push(`${i + 1}. ${entry.kind} ${entry.action}${entry.text === null ? "" : ` → ${JSON.stringify(entry.text)}`} (page changed: ${changed})`);
+      lines.push(`${i + 1}. ${entry.kind} ${actionWithNotices(entry)}${entry.text === null ? "" : ` → ${JSON.stringify(entry.text)}`} (page changed: ${changed})`);
     });
   }
 

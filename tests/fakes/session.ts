@@ -227,6 +227,7 @@ export function makeObservation(overrides: Partial<Observation> = {}): Observati
     scroll: { y: 0, height: 720 },
     actions: [],
     omittedActions: 0,
+    notices: [],
     marker: { kind: "page" },
     pageKey: { href: "https://example.test/start" },
     guards: {},

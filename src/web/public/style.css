@@ -2119,6 +2119,14 @@ code {
   font-weight: 600;
 }
 
+/* 页面提示可能是一整句话：列表里只露一行，全文在右侧详情 */
+.step-flag--notice {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .step-text {
   max-width: 100%;
   overflow: hidden;

@@ -24,7 +24,7 @@ import { createBudgetMeter } from "../src/core/budget.ts";
 import { InputInterrupted, OccludedTarget, StalePage } from "../src/core/errors.ts";
 import { createScriptedEngine, constantSteps } from "../src/engine/scripted.ts";
 import type { ScriptedStep } from "../src/engine/scripted.ts";
-import type { Answer, DecisionEngine } from "../src/engine/types.ts";
+import type { Answer, DecisionEngine, DecisionRequest } from "../src/engine/types.ts";
 import { attachFailedCallUsage } from "../src/engine/types.ts";
 import { CaseDefinitionSchema } from "../src/schema/case.ts";
 import type { Case, CaseDefinition } from "../src/schema/case.ts";
@@ -134,6 +134,19 @@ const ACCEPTED: ScriptedStep = {
 /** 一个可点、可填、可滚、可等的页面。 */
 function richPage(overrides: Partial<Observation> = {}): Observation {
   return makeObservation({ actions: interactiveActions(), ...overrides });
+}
+
+/**
+ * 三个链接的页面。点了没反应的节点会被移出 CLICK 候选（见 agent.ts 的 `ineffectiveClicks`），
+ * 于是「一直选 `"1"`」在页面不变时会依次点到三个不同的链接——无进展闸要拦的正是这种换着点也没用的空转。
+ */
+function linksPage(overrides: Partial<Observation> = {}): Observation {
+  return makeObservation({
+    actions: [1, 2, 3].map((node) =>
+      makeAction({ id: `e${node}`, kind: "click", label: `Link ${node}`, role: "link", node }),
+    ),
+    ...overrides,
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -369,7 +382,7 @@ test("不变量 2：一次成功变更之后，文本缓存清空（不复用为
 // ---------------------------------------------------------------------------
 
 test("不变量 5：连续 N 步页面无变化且非 wait -> blocked", async () => {
-  const page = richPage({ fingerprint: "fp-stuck" });
+  const page = linksPage({ fingerprint: "fp-stuck" });
   const session = new FakeSession({ observations: [page] });
   const engine = createScriptedEngine({ steps: constantSteps(clickLink(), 5) });
 
@@ -379,11 +392,16 @@ test("不变量 5：连续 N 步页面无变化且非 wait -> blocked", async ()
   assert.equal(report.steps.length, DEFAULT_NO_PROGRESS_LIMIT, "第 3 次无变化即判定卡死");
   assert.equal(session.actCount, DEFAULT_NO_PROGRESS_LIMIT);
   assert.ok(report.steps.every((step) => step.pageChanged === false));
+  assert.deepEqual(
+    report.steps.map((step) => step.action),
+    ["Link 1", "Link 2", "Link 3"],
+    "点了没反应的链接不再是候选，换着点也照样判卡死",
+  );
   assert.match(report.failureReason ?? "", /连续 3 步/);
 });
 
 test("不变量 5：pageChanged 为 null 不计入连续计数（否则正常导航会被误判卡死）", async () => {
-  const page = richPage({ fingerprint: "fp-same" });
+  const page = linksPage({ fingerprint: "fp-same" });
   const session = new FakeSession({
     // 第一个动作之后观测失败（null），之后都是同一个页面（false）
     observations: [page, { error: new StalePage("导航打断了观测") }, page],
@@ -427,6 +445,104 @@ test("不变量 5：WAIT 不参与无进展计数（否则空转的等待会被�
   // 4 步都无变化，但其中两步是 wait：没有卡死判定，一路走到预算上限
   assert.equal(report.status, "budget_exceeded");
   assert.equal(report.steps.length, 4);
+});
+
+// ---------------------------------------------------------------------------
+// 点了没反应的目标：页面变化前不再提供
+// ---------------------------------------------------------------------------
+
+/** 记下每次决策请求的 scripted 引擎包装。 */
+function recording(inner: DecisionEngine): { engine: DecisionEngine; requests: DecisionRequest[] } {
+  const requests: DecisionRequest[] = [];
+  return {
+    requests,
+    engine: {
+      name: inner.name,
+      capabilities: inner.capabilities,
+      decide(req, signal) {
+        requests.push(req);
+        return inner.decide(req, signal);
+      },
+      writeText: (req, signal) => inner.writeText(req, signal),
+      close: () => inner.close(),
+    },
+  };
+}
+
+function clickLabels(req: DecisionRequest | undefined): string[] {
+  assert.ok(req !== undefined, "应当有这一次决策请求");
+  return req.state.elements.filter((element) => element.operations.includes("CLICK")).map((element) => element.label);
+}
+
+test("点了没反应的目标：页面变化前不再作为 CLICK 候选，页面一变就放回", async () => {
+  const session = new FakeSession({
+    // 第 0 步之后没变（fp-a），第 1 步之后变了（fp-b）
+    observations: [linksPage({ fingerprint: "fp-a" }), linksPage({ fingerprint: "fp-a" }), linksPage({ fingerprint: "fp-b" })],
+  });
+  const { engine, requests } = recording(createScriptedEngine({ steps: [clickLink(), clickLink(), done()] }));
+
+  const { report, events } = await runCase({ caseDef: makeCase(), session, engine });
+
+  assert.equal(report.status, "done");
+  assert.deepEqual(clickLabels(requests[0]), ["Link 1", "Link 2", "Link 3"]);
+  assert.deepEqual(clickLabels(requests[1]), ["Link 2", "Link 3"], "Link 1 点了没反应，这一步不再给");
+  assert.deepEqual(clickLabels(requests[2]), ["Link 1", "Link 2", "Link 3"], "页面变了，全部放回");
+  assert.deepEqual(
+    report.steps.map((step) => step.action),
+    ["Link 1", "Link 2"],
+  );
+  const logs = eventsOf(events, "run.log").map((event) => (event.type === "run.log" ? event.message : ""));
+  assert.equal(logs.filter((message) => message.includes("不再把它作为点击候选")).length, 1, logs.join("\n"));
+});
+
+test("点了没反应的目标：只剔除 CLICK，同一个输入框照样能输入", async () => {
+  const field = [
+    makeAction({ id: "e1", kind: "fill", label: "SKU", role: "textbox", node: 1 }),
+    makeAction({ id: "e2", kind: "click", label: "Open SKU", role: "textbox", node: 1 }),
+    makeAction({ id: "e3", kind: "click", label: "确定", role: "button", node: 2 }),
+  ];
+  const session = new FakeSession({ observations: [makeObservation({ actions: field })] });
+  const { engine, requests } = recording(
+    createScriptedEngine({
+      steps: [
+        { operation: { choice: "CLICK" }, targets: { click_target: { choice: "1" } } },
+        { operation: { choice: "DONE" } },
+      ],
+    }),
+  );
+
+  await runCase({ caseDef: makeCase(), session, engine });
+
+  const second = requests[1];
+  assert.ok(second !== undefined);
+  const sku = second.state.elements.find((element) => element.label === "SKU");
+  assert.deepEqual(sku?.operations, ["TYPE_TEXT"], "点不动的只是点击，输入不受影响");
+});
+
+test("页面提示：动作之后的提示记进 StepRecord，并随近期动作与当前页面一起交给引擎", async () => {
+  const before = linksPage({ fingerprint: "fp-a" });
+  const after = linksPage({ fingerprint: "fp-b", notices: ["请输入SKU"] });
+  const session = new FakeSession({ observations: [before, after] });
+  const { engine, requests } = recording(createScriptedEngine({ steps: [clickLink(), done()] }));
+
+  const { report } = await runCase({ caseDef: makeCase(), session, engine });
+
+  assert.deepEqual(stepAt(report, 0).notices, ["请输入SKU"]);
+  assert.deepEqual(requests[0]?.state.notices, []);
+  assert.deepEqual(requests[1]?.state.notices, ["请输入SKU"], "当前页面的提示");
+  assert.deepEqual(requests[1]?.state.recentActions[0]?.notices, ["请输入SKU"], "上一步之后弹出的提示");
+});
+
+test("页面提示：动作之后观测失败时不记提示（与 pageChanged: null 同一种「没看到」）", async () => {
+  const session = new FakeSession({
+    observations: [linksPage({ fingerprint: "fp-a" }), { error: new StalePage("导航打断") }, linksPage({ fingerprint: "fp-b" })],
+  });
+  const engine = createScriptedEngine({ steps: [clickLink(), done()] });
+
+  const { report } = await runCase({ caseDef: makeCase(), session, engine });
+
+  assert.equal(stepAt(report, 0).pageChanged, null);
+  assert.equal(stepAt(report, 0).notices, undefined);
 });
 
 // ---------------------------------------------------------------------------

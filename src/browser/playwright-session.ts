@@ -192,6 +192,7 @@ interface RawSnapshot {
   page_key: unknown;
   guards: Record<string, unknown>;
   omitted_actions: number;
+  notices?: string[];
 }
 
 /** `page_key` 的元组结构，见 snapshot.js 的 `cache.pageKey`。 */
@@ -610,6 +611,7 @@ export function createPlaywrightSession(options: PlaywrightSessionOptions): Sess
       scroll,
       actions,
       omittedActions: raw.omitted_actions ?? 0,
+      notices: Array.isArray(raw.notices) ? raw.notices.filter((notice) => typeof notice === "string") : [],
       marker: raw.marker,
       pageKey: raw.page_key,
       guards: raw.guards ?? {},

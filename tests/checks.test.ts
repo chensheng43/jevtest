@@ -46,6 +46,7 @@ function pageWith(over: Partial<Observation> = {}): Observation {
     scroll: { y: 0, height: 2400 },
     actions: [actionWith()],
     omittedActions: 0,
+    notices: [],
     marker: null,
     pageKey: null,
     guards: {},

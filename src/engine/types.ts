@@ -70,6 +70,8 @@ export interface RecentActionIR {
   kind: ActionKind;
   text: string | null;
   pageChanged: boolean | null;
+  /** 这一步之后页面上显示的提示（见 `Observation.notices`）。没观测到或老报告里为缺省 */
+  notices?: string[];
 }
 
 export interface PageStateIR {
@@ -78,6 +80,8 @@ export interface PageStateIR {
   /** 可见文本，已截断。参考项目取 6000 字符（`snapshot.js:92`） */
   text: string;
   textTruncated: boolean;
+  /** 当前可见的页面提示（toast / alert / 表单校验）。文字也在 `text` 里，这里是给引擎置顶用的 */
+  notices: string[];
   elements: ElementIR[];
   /** 最近若干步，让模型知道哪些已经做过 */
   recentActions: RecentActionIR[];

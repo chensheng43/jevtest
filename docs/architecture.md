@@ -112,6 +112,8 @@ POST /api/runs {caseIds: ["wikipedia-godel"]}
               ├─ session.observe()
               │    导航打断了也不影响上面那条记录
               │
+              ├─ 点了没反应（CLICK 且 pageChanged=false）的节点移出下一步的 CLICK 候选，
+              │    页面一变就放回（见 §6.5）
               ├─ 无进展检测：连续 3 步 pageChanged=false 且非 wait -> blocked
               │    （决策在执行前被丢弃的，另算：连续丢弃 3 次 -> blocked，见 §6.4）
               ├─ signal.throwIfAborted()            取消 -> cancelled
@@ -331,6 +333,11 @@ observation must not erase the action.*）
 这是防「模型在一个它看不懂的页面上无限空转」的最后一道闸，
 **也是最省钱的一道**。上游把 3 写死在代码里，本项目泛化成
 `trajectory.maxIdenticalConsecutive`。
+
+在它之前还有一道更轻的：一次 CLICK 之后页面没变，这个节点在页面变化之前不再作为 CLICK 候选。
+模型看得到 `page_changed: false`，却常常照样再点一次；拿掉它，模型只能去试别的控件。
+换着点也没用的时候，这道闸照样在第 3 步判 blocked。配合它的是页面提示（`Observation.notices`，
+置顶交给模型、记进 `StepRecord.notices`），让模型看得到上一次为什么没成。见 [decisions.md D23](decisions.md)。
 
 ### 6.6 取消只在步边界生效
 

@@ -163,6 +163,7 @@ function decisionRequest(): DecisionRequest {
       title: "Wikipedia, the free encyclopedia",
       text: "The Free Encyclopedia",
       textTruncated: false,
+      notices: [],
       elements: [{ index: "3", label: "Search", role: "combobox", value: "", operations: ["TYPE_TEXT"] }],
       recentActions: [{ action: "CLICK [12] link Wikipedia", kind: "click", text: null, pageChanged: true }],
       omittedActions: 0,
@@ -317,6 +318,29 @@ test("请求形状：一次带全部问题、rules 与元素表原样下发、bu
   // 顶层只有这三个键。BudgetView 不进请求体——多一个键就是给一个严格校验的
   // 服务端多一个拒绝的理由，而它只回一句 Invalid request.，排查代价全在我们这侧。
   assert.deepEqual(Object.keys(body).sort(), ["model", "questions", "state"]);
+  await engine.close();
+});
+
+test("页面提示只能拼进已有字段：置顶在 page.text，近期动作写进 action 串，不新增键", async (t) => {
+  const endpoint = await startEndpoint(t, () => ({ status: 200, json: okBody() }));
+  const engine = createTypeSafeEngine(engineOptions(endpoint.endpoint));
+  const request = decisionRequest();
+  request.state.notices = ["请输入SKU"];
+  request.state.recentActions = [
+    { action: "确定", kind: "click", text: null, pageChanged: false, notices: ["请输入SKU", "导入失败"] },
+  ];
+
+  await engine.decide(request, new AbortController().signal);
+
+  const state = (endpoint.requests[0]?.body as Record<string, any>)["state"];
+  assert.deepEqual(Object.keys(state.page).sort(), ["text", "title", "url"]);
+  assert.equal(
+    state.page.text,
+    "Notices currently shown on the page (toasts / alerts / validation):\n- 请输入SKU\n\nPage text:\nThe Free Encyclopedia",
+  );
+  assert.deepEqual(state.recent_actions, [
+    { action: "确定 (afterwards the page showed: 请输入SKU | 导入失败)", kind: "click", text: null, page_changed: false },
+  ]);
   await engine.close();
 });
 

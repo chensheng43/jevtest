@@ -108,6 +108,7 @@ export function createTrace(runId) {
       else if (item.pageChanged === false) meta.append(el("span", { class: "step-flag", text: "页面没变化" }));
       else if (item.pageChanged === null && !item.pending) meta.append(el("span", { class: "step-flag", text: "结果未观测到" }));
       if (item.text) meta.append(el("span", { class: "step-text", text: `“${item.text}”` }));
+      if (item.notices?.length) meta.append(el("span", { class: "step-flag step-flag--notice", title: "这一步之后页面上的提示", text: `提示：${item.notices.join(" / ")}` }));
     } else if (item.url) {
       meta.append(el("span", { class: "mono step-url", text: item.url }));
     }
@@ -193,6 +194,9 @@ export function createTrace(runId) {
       item.pending
         ? null
         : ["页面变化", el("span", { text: item.pageChanged === null ? "未观测到（例如导航打断了观测），不代表动作没发生" : item.pageChanged ? "有" : "没有" })],
+      item.notices?.length
+        ? ["页面提示", el("span", {}, item.notices.map((notice) => el("div", { class: "break", text: notice })))]
+        : null,
       typeof item.engineLatencyMs === "number"
         ? ["耗时", el("span", { class: "mono", text: `决策 ${duration(item.engineLatencyMs)}${item.textLatencyMs ? `，取值 ${duration(item.textLatencyMs)}` : ""}` })]
         : null,

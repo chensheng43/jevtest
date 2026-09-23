@@ -36,6 +36,7 @@
 | `detail.js` | 详情页填充与返回 |
 | `frames.html` | 一个同源 + 一个跨域 iframe（跨域靠换成 `localhost` 访问同一服务），给准入探测的 frame 计数用 |
 | `pointer.html` | jQuery 式下拉菜单：`<li>` 无 role、靠 `cursor: pointer` + 事件委托可点，另有禁用项（`no-drop`）和与语义候选重叠的 pointer 元素 |
+| `notices.html` | 页面提示：自造的 fixed toast（`#msg-mini.msgno`，无 role）、`role=alert` 的表单校验、嵌套的 toast 组；以及不该收的：整宽常驻公告、1px 读屏 live 区域、`display:none` 的 toast、非浮层的 `message-list` |
 | `late.html` + `late.json` | 按钮在 DOMContentLoaded 之后由一次慢接口（`?delay=800`）拉回来，给「打开起始页先等网络安静」用 |
 
 配套的静态服务在 `tests/e2e/fixture-server.ts`，导出

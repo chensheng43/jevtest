@@ -69,7 +69,7 @@ import type {
   CaseRunReport,
   StepRecord,
 } from "../schema/report.ts";
-import type { DecisionEngine, DecisionResult, RecentActionIR, TextRequest } from "../engine/types.ts";
+import type { DecisionEngine, DecisionResult, TextRequest } from "../engine/types.ts";
 import { failedCallUsage } from "../engine/types.ts";
 import type { Action, Observation, Session } from "../browser/session.ts";
 import type { BudgetMeter } from "./budget.ts";
@@ -80,11 +80,11 @@ import { admit } from "../browser/admission.ts";
 import { assertAllowedOrigin, checkAction, loginRedirectHint } from "./guard.ts";
 import {
   MAX_WEAK_BLOCKED_OVERRIDES,
-  RECENT_ACTIONS,
   buildActionSpace,
   buildDecisionRequest,
   isTerminal,
   overrideWeakBlocked,
+  recentActions,
   resolveDecision,
 } from "./policy.ts";
 import { buildTextRequest, textContextKey } from "../engine/text.ts";
@@ -192,6 +192,18 @@ export class CaseAgent {
   private weakBlockedOverrides = 0;
   /** 自上一次成功执行以来，连续丢弃了几次决策（上限 MAX_CONSECUTIVE_DISCARDS） */
   private consecutiveDiscards = 0;
+  /**
+   * 点过、但页面纹丝不动的节点。页面变化之前，它们不再作为 CLICK 候选（构造期剔除）。
+   *
+   * 模型看得到 `page_changed: false`，却不会据此换一个做法：一次真跑里它把表单的「确定」
+   * 连点了四次，每次都弹「请输入SKU」，直到无进展闸把运行判成 blocked——
+   * 而出路（改选一个单选项）一直在候选集里。拿掉点不动的那个，模型只能去看别的控件。
+   *
+   * 只收 pageChanged 严格为 false 的 CLICK；页面一变（true）或没能观测（null）就整个清空：
+   * 节点身份只在同一文档里有效，导航之后同一个号可能已是别的元素。
+   * 无进展闸照旧——换着点别的也没用，照样连续 N 步判 blocked。
+   */
+  private readonly ineffectiveClicks = new Set<number>();
 
   constructor(deps: AgentDeps) {
     this.deps = deps;
@@ -293,7 +305,10 @@ export class CaseAgent {
       }
 
       // ---- 5. 决策 --------------------------------------------------------
-      const space = buildActionSpace(page.actions, { mode: caseDef.mode });
+      const space = buildActionSpace(page.actions, {
+        mode: caseDef.mode,
+        ineffectiveClicks: this.ineffectiveClicks,
+      });
       const request = buildDecisionRequest({
         caseDef,
         page,
@@ -527,9 +542,11 @@ export class CaseAgent {
       } else {
         record.urlAfter = next.url;
         record.pageChanged = next.fingerprint !== page.fingerprint;
+        record.notices = next.notices;
         this.page = next;
       }
       record.observedMs = budget.stats().elapsedMs;
+      this.trackIneffectiveClick(resolved, record);
 
       // ---- 12. 无进展检测 --------------------------------------------------
       // **只有 `false` 计入连续计数。** null（观测失败）既不算无变化也不延续计数：
@@ -725,6 +742,27 @@ export class CaseAgent {
     );
   }
 
+  /** 维护 `ineffectiveClicks`：点了没反应的节点记下来，页面一变就全部放回。 */
+  private trackIneffectiveClick(resolved: Resolved, record: StepRecord): void {
+    if (record.pageChanged !== false) {
+      this.ineffectiveClicks.clear();
+      return;
+    }
+    const node = resolved.action.node;
+    if (resolved.operation !== "CLICK" || node === undefined || this.ineffectiveClicks.has(node)) return;
+    this.ineffectiveClicks.add(node);
+    const notices = record.notices ?? [];
+    this.deps.events.emit({
+      type: "run.log",
+      runId: this.runId,
+      level: "info",
+      message:
+        `点击「${resolved.action.label}」后页面没有变化` +
+        (notices.length > 0 ? `（页面提示：${notices.join(" / ")}）` : "") +
+        `：页面变化之前不再把它作为点击候选，免得模型反复点同一处`,
+    });
+  }
+
   /** 观测一次。**读可以重试，变更不行**：导航恰好打断一次读取是正常现象。 */
   private async observeOnce(): Promise<Observation> {
     try {
@@ -896,16 +934,6 @@ export class CaseAgent {
 /** 取某个 head 的概率分布。缺这个 head 时给空表而不是抛错——它只用于展示。 */
 function probabilitiesOf(decision: DecisionResult, key: string): Record<string, number> {
   return decision.answers[key]?.probabilities ?? {};
-}
-
-/** 最近的若干步，供文本取值与决策请求参考（参考项目 model.py:113 取 10 条）。 */
-function recentActions(history: StepRecord[]): RecentActionIR[] {
-  return history.slice(-RECENT_ACTIONS).map((step) => ({
-    action: step.action,
-    kind: step.kind,
-    text: step.text,
-    pageChanged: step.pageChanged,
-  }));
 }
 
 function messageOf(error: unknown): string {
