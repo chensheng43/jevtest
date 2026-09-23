@@ -22,6 +22,11 @@ import { slugify } from "./yaml.ts";
 import { actionKindSchema, runStatusSchema } from "./events.ts";
 import type { ActionKind, Operation, RunStatus } from "./events.ts";
 
+// zod 内置的校验文案改成中文。它是进程级的全局配置，放在这里是因为用例 schema 是
+// 一切校验的入口（Web 的保存/导入、CLI 的 validate/import 都经过它）；
+// 以前界面上直接出现「Too small: expected string to have >=1 characters」。
+z.config(z.locales.zhCN());
+
 // ---------------------------------------------------------------------------
 // 断言：最终页面
 // ---------------------------------------------------------------------------
@@ -137,7 +142,7 @@ export interface Assertions {
  *
  * 内置默认集（破坏性动词、密码框、文件上传）**只增不减**：用例只能追加，
  * 不能移除。要移除必须显式设置 `allowDefaultOverride: true`，
- * 且报告顶部会打红色横幅。
+ * 且报告应打红色横幅（尚未落地，见 docs/limitations.md §9）。
  */
 export interface Guardrail {
   labelContains?: string;
@@ -187,6 +192,11 @@ export interface CaseDefinition {
   mode?: CaseMode;
   /** 域名白名单。缺省由 startUrl 的 origin 推导 */
   allowedOrigins?: string[];
+  /**
+   * 登录态的**名字**（不是路径）。运行时从 `<JEVTEST_AUTH_DIR>/<名字>.json` 载入
+   * cookie 与 localStorage。缺省 = 以未登录的全新浏览器打开 startUrl
+   */
+  authState?: string;
   budget?: Partial<Budget>;
   guardrails?: Guardrail[];
   allowDefaultOverride?: boolean;
@@ -218,6 +228,8 @@ export interface Case {
   startUrl: string;
   mode: CaseMode;
   allowedOrigins: string[];
+  /** 没有默认值：缺省就是「不带登录态」，也因此不影响旧用例的 digest */
+  authState?: string;
   budget: Budget;
   guardrails: Guardrail[];
   allowDefaultOverride: boolean;
@@ -241,6 +253,12 @@ export interface CaseRevision {
 
 /** `docs/case-format.md` 的 id 规则：小写字母数字开头，其后可含连字符，总长 2~64。 */
 const ID_PATTERN = /^[a-z0-9][a-z0-9-]{1,63}$/;
+
+/**
+ * 登录态名称与用例 id 同一套规则。它会拼进磁盘路径（`<authDir>/<名字>.json`），
+ * 因此只收名字、不收路径：用例可以从 Web 端创建，收路径就等于让用例指向本机任意文件。
+ */
+export const AUTH_STATE_NAME_PATTERN = ID_PATTERN;
 
 /**
  * 只接受 http/https。
@@ -416,6 +434,10 @@ const caseObjectSchema = z.object({
   startUrl: z.string().refine(isHttpUrl, { message: "startUrl 必须是 http/https 的绝对地址" }),
   mode: z.enum(["interactive", "readonly"]).default("interactive"),
   allowedOrigins: z.array(originSchema).optional(),
+  authState: z
+    .string()
+    .regex(ID_PATTERN, "authState 是登录态的名字：小写字母、数字与连字符，需以字母或数字开头，长度 2~64")
+    .optional(),
   // ⚠️ 必须是 prefault 而不是 default：`.default({})` 会把 {} 原样返回、不走 schema 解析，
   // budget.maxModelCalls 随之变成 undefined——预算静默失效、成本无上限，且不报错。
   budget: budgetSchema.prefault({}),

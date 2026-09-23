@@ -58,6 +58,11 @@ export interface StepRecord {
   urlAfter: string | null;
   /** null = 执行后观测失败（例如导航打断），不代表动作没发生 */
   pageChanged: boolean | null;
+  /**
+   * 执行后那次观测里可见的页面提示（toast / alert / 表单校验）。
+   * 观测失败时缺省（与 `pageChanged: null` 同一种「没看到」）；早于这个字段的报告里也没有它。
+   */
+  notices?: string[];
 
   engineLatencyMs: number;
   textLatencyMs: number;
@@ -65,6 +70,35 @@ export interface StepRecord {
   observedMs: number;
   /** 截图序号，对应 runs/<runId>/frames/<frame>.jpg */
   frame: number | null;
+  engineUsage: Usage;
+}
+
+/**
+ * 结束运行的那次终止决策（DONE / BLOCKED）。
+ *
+ * 终止决策不执行动作，因此不产生 StepRecord；没有这条记录，报告里就查不到
+ * 「模型说完成时有多确定」，`stats.decisions` 比 `steps` 多出来的那几次也无从解释。
+ * 一次真跑里模型把没点成的「确定」当成做过、弹窗还开着就回了 DONE，
+ * 事后想知道它给 DONE 的概率只能重跑。
+ *
+ * 只记**生效**的那一次：新鲜度复查时被丢弃的终止决策（见 agent.ts 的 discardDecision）
+ * 只有 `step.skipped` 事件。
+ */
+export interface TerminalDecision {
+  /** 做这个决策时的步号，等于它若是普通动作将得到的 `StepRecord.step` */
+  step: number;
+  operation: "DONE" | "BLOCKED";
+  operationProbability: number;
+  /** 每个候选操作的概率：看得出模型在「完成」与「再操作一步」之间犹豫了多少 */
+  operationProbabilities: Record<string, number>;
+  confidence: number;
+  /** `degenerate` 时上面的概率是合成的单点值，不代表模型有多确定 */
+  distribution: "full" | "degenerate";
+  /** 做这个决策时看到的那一页 */
+  url: string;
+  /** 那一页的截图序号；通常与 `finalFrame` 相同 */
+  frame: number | null;
+  engineLatencyMs: number;
   engineUsage: Usage;
 }
 
@@ -169,8 +203,18 @@ export interface CaseRunReport {
   goal: string;
   startUrl: string;
   finalUrl: string | null;
+  /**
+   * 运行结束时那一页的截图序号（`frames/<n>.jpg`）。终止决策不产生 StepRecord，
+   * 这是看到「最后停在哪一页」的唯一一帧。没截图为 null；早于这个字段的报告里没有它。
+   */
+  finalFrame?: number | null;
 
   steps: StepRecord[];
+  /**
+   * 以 DONE / BLOCKED 结束时，那次决策本身。其它结束方式（预算、护栏、无进展、取消、故障）
+   * 为 null；早于这个字段的报告里没有它。
+   */
+  terminalDecision?: TerminalDecision | null;
   guardrailHits: { step: number; reason: string; action: string }[];
   assertion: AssertionResult | null;
   stats: RunStats;
@@ -196,6 +240,12 @@ export interface RunIndexEntry {
   passed: boolean | null;
   elapsedMs: number;
   steps: number;
+  /**
+   * 整次运行的 token 合计（含重试）。`null` 只出现在加这两个字段之前写下的旧行上——
+   * 那时没记，就是未知，不能补 0。
+   */
+  inputTokens: number | null;
+  outputTokens: number | null;
   costUsd: number | null;
 }
 
@@ -267,10 +317,25 @@ const stepRecordSchema = z.object({
   urlAfter: z.string().nullable(),
   // 三态：null 是「没能观测」，不是「没变化」。缺了 nullable 会让正常导航的报告读不出来。
   pageChanged: z.boolean().nullable(),
+  // optional 而不是 nullable：老报告里没有这个字段，不能因为读旧物证而失败（同 finalFrame）
+  notices: z.array(z.string()).optional(),
   engineLatencyMs: z.number().nonnegative(),
   textLatencyMs: z.number().nonnegative(),
   observedMs: z.number().nonnegative(),
   frame: z.number().int().nonnegative().nullable(),
+  engineUsage: usageSchema,
+});
+
+const terminalDecisionSchema = z.object({
+  step: z.number().int().nonnegative(),
+  operation: z.enum(["DONE", "BLOCKED"]),
+  operationProbability: z.number(),
+  operationProbabilities: z.record(z.string(), z.number()),
+  confidence: z.number(),
+  distribution: z.enum(["full", "degenerate"]),
+  url: z.string(),
+  frame: z.number().int().nonnegative().nullable(),
+  engineLatencyMs: z.number().nonnegative(),
   engineUsage: usageSchema,
 });
 
@@ -337,8 +402,11 @@ export const reportSchema: ZodType<CaseRunReport, CaseRunReport> = z.object({
   goal: z.string(),
   startUrl: z.string(),
   finalUrl: z.string().nullable(),
+  finalFrame: z.number().int().nonnegative().nullable().optional(),
 
   steps: z.array(stepRecordSchema),
+  // optional 而不是只 nullable：老报告里没有这个字段（同 finalFrame）
+  terminalDecision: terminalDecisionSchema.nullable().optional(),
   guardrailHits: z.array(
     z.object({
       step: z.number().int().nonnegative(),
@@ -376,6 +444,8 @@ export const runIndexEntrySchema: ZodType<RunIndexEntry, RunIndexEntry> = z.obje
   passed: z.boolean().nullable(),
   elapsedMs: z.number().nonnegative(),
   steps: z.number().int().nonnegative(),
+  inputTokens: z.number().int().nonnegative().nullable(),
+  outputTokens: z.number().int().nonnegative().nullable(),
   // 与报告同一纪律：未知就是 null，不能用 0 冒充（§5）。
   costUsd: z.number().nonnegative().nullable(),
 });

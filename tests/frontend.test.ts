@@ -5,30 +5,45 @@
  * 也没有 jsdom/happy-dom。所以这里不验「界面长什么样」，只验**改了会静默坏掉**的
  * 跨文件约定：界面不会报错，只会看起来正常地做错事。
  *
- * 守住三件事：
+ * 守住几件事：
  *
- *   1. `app.js` 里 `getElementById("x")` 查到的元素，`index.html` 里真的存在。
- *      少了它不报错，只是路由或队列指示器对着 null 赋值，然后在控制台里安静地停摆。
- *   2. `app.js` 发请求用的头名与 `security.ts` 的 `TOKEN_HEADER` 一致。
+ *   1. 前端代码里 `getElementById("x")` 查到的元素，`index.html` 里真的存在。
+ *   2. 发请求用的头名与 `security.ts` 的 `TOKEN_HEADER` 一致。
  *      不一致的表现是**所有写操作 403**，而页面本身看不出任何异常。
  *   3. D9 / D8：`skipped` 不能借用 `passed` 的颜色，`undecided` 不能借用任何一方的颜色。
- *      把「跳过」画成「通过」就是在界面上谎报覆盖——这是全项目最不能出错的一条视觉约定。
+ *   4. 编辑器的纯函数（`lib/core.js`）把用例读进来再写出去，意思一字不变。
+ *   5. 反馈只有一套：不用原生 alert / confirm / prompt。
+ *
+ * 前端是原生 ES modules（`app.js` 入口 + lib/ ui/ components/ views/），
+ * 下面的 `JS` 是全部模块的拼接，按「整个前端」而不是「某一个文件」做静态检查。
  */
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { readFileSync, readdirSync } from "node:fs";
+import { join, relative, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 
 import { TOKEN_HEADER, resolveVendorPath } from "../src/web/security.ts";
 import { CaseDefinitionSchema } from "../src/schema/case.ts";
 import { parseCase } from "../src/schema/yaml.ts";
+import { loginRedirectHint } from "../src/core/guard.ts";
 
 const PUBLIC_DIR = join(import.meta.dirname, "..", "src", "web", "public");
 const read = (name: string) => readFileSync(join(PUBLIC_DIR, name), "utf8");
 
+/** public/ 下全部 .js 模块（相对路径） */
+function jsModules(dir = PUBLIC_DIR): string[] {
+  return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) return jsModules(full);
+    return entry.name.endsWith(".js") ? [relative(PUBLIC_DIR, full)] : [];
+  });
+}
+
+const MODULES = jsModules();
 const HTML = read("index.html");
-const JS = read("app.js");
+const JS = MODULES.map((name) => `// ==== ${name}\n${read(name)}`).join("\n");
 const CSS = read("style.css");
 
 /** 取出某个类名对应规则块的声明体。 */
@@ -43,7 +58,16 @@ function ruleBody(selector: string): string {
 // DOM 钩子
 // ---------------------------------------------------------------------------
 
-test("index.html 提供 app.js 会去查的每一个 id", () => {
+test("前端模块齐全：入口在，且每个模块都被某处 import（没有死文件）", () => {
+  assert.ok(MODULES.includes("app.js"), "入口 app.js 不见了");
+  assert.match(HTML, /<script type="module" src="\/app.js"><\/script>/);
+  for (const name of MODULES.filter((item) => item !== "app.js")) {
+    const base = name.split("/").pop() ?? name;
+    assert.ok(new RegExp(`from "[./]+(?:[a-z]+/)?${base.replace(".", "\\.")}"`).test(JS), `${name} 没有被任何模块 import`);
+  }
+});
+
+test("index.html 提供前端代码会去查的每一个 id", () => {
   const ids = [...JS.matchAll(/getElementById\("([^"]+)"\)/g)].map((match) => match[1]);
   // 这个下限本身是断言：匹配正则一旦失效，下面循环会空转成「通过」。
   assert.ok(ids.length >= 2, `应该至少查到 #app 与 #queue，实际查到 ${ids.length} 个`);
@@ -177,7 +201,12 @@ test("前端只引 Bootstrap 的 CSS，不引它的 JS（D18 的信任边界）"
   );
 });
 
-test("app.js 里没有 innerHTML 赋值（el() 的运行时报错之外再加一道静态的）", () => {
+test("反馈只有一套：不用原生 alert / confirm / prompt（用 ui/feedback.js）", () => {
+  const native = /(?<![\w.$])(alert|confirm|prompt)\(/.exec(JS);
+  assert.equal(native, null, `有地方在用原生 ${native?.[1]}()：它说不清后果、按钮只能叫「确定」，走查脚本也点不到`);
+});
+
+test("前端没有 innerHTML 赋值（el() 的运行时报错之外再加一道静态的）", () => {
   assert.ok(!/\.innerHTML\s*=/.test(JS), "有地方在直接拼 HTML：动态文本一律走 textContent");
   assert.ok(!/\.outerHTML\s*=/.test(JS), "同上");
 });
@@ -192,38 +221,30 @@ interface EditorCore {
   normalizeDraft: (def: unknown) => Record<string, unknown>;
   assertionRows: (draft: Record<string, unknown>) => { recipe: { kind: string }; path: string; value: unknown }[];
   draftSummary: (draft: Record<string, unknown>) => { assertions: number; limits: number };
+  suggestAuthName: (url: string) => string;
+  fieldLabel: (path: string) => string;
+  checkLabel: (key: string) => string;
+  issueMessage: (message: string) => string;
 }
 
 /**
- * 在干净的作用域里执行 app.js 的纯函数区。
- *
- * 前端没有 DOM 测试环境——本项目刻意不引 jsdom（见 `docs/development.md`）。
- * 但「载入一个用例、界面重画一遍、再保存」这条路上最不能靠肉眼保证的一件事是
- * **有没有东西被丢掉**：丢了不报错，只是断言少了几条。所以这里用最朴素的办法
- * 把它跑起来：那两段代码不碰 DOM，可以作为一段自包含的脚本求值。
+ * 编辑器的纯函数模块。它不碰 DOM，可以直接在 Node 里 import——
+ * 「载入一个用例、界面重画一遍、再保存」这条路上最不能靠肉眼保证的一件事是
+ * **有没有东西被丢掉**：丢了不报错，只是断言少了几条。
  */
-function editorCore(source: string): EditorCore {
-  const blocks = [...source.matchAll(/\/\/ #region 纯函数[^\n]*\n([\s\S]*?)\/\/ #endregion/g)]
-    .map((match) => match[1] ?? "");
-  assert.ok(blocks.length >= 2, `app.js 里应该有两段标了「#region 纯函数」的代码，实际 ${blocks.length} 段`);
-  const factory = new Function(`${blocks.join("\n")}
-    return { formToDefinition, normalizeDraft, assertionRows, draftSummary };`);
-  return factory() as EditorCore;
-}
+const core = (await import(pathToFileURL(join(PUBLIC_DIR, "lib", "core.js")).href)) as EditorCore;
 
 const SEED_CASE = parseCase(
   readFileSync(join(import.meta.dirname, "..", "cases", "wikipedia-godel.yaml"), "utf8"),
   "wikipedia-godel.yaml",
 );
 
-test("纯函数区真的能被抠出来跑（不是靠肉眼读代码）", () => {
-  const core = editorCore(JS);
+test("lib/core.js 能在没有 DOM 的环境里直接 import（不是靠肉眼读代码）", () => {
   assert.equal(typeof core.formToDefinition, "function");
   assert.ok(core.assertionRows(core.normalizeDraft(SEED_CASE)).length > 0, "种子用例应该能摊出断言行来");
 });
 
 test("种子用例：载入编辑器再保存，语义一字不变", () => {
-  const core = editorCore(JS);
   const saved = core.formToDefinition(core.normalizeDraft(SEED_CASE));
   assert.deepEqual(
     CaseDefinitionSchema.parse(saved),
@@ -233,12 +254,12 @@ test("种子用例：载入编辑器再保存，语义一字不变", () => {
 });
 
 test("全覆盖：每一个配方与每一处原始字段都落得下去", () => {
-  const core = editorCore(JS);
   const def = CaseDefinitionSchema.parse({
     title: "全覆盖",
     goal: "把所有字段都设一遍",
     startUrl: "https://example.test/",
     allowedOrigins: ["https://example.test"],
+    authState: "example-admin",
     mode: "readonly",
     budget: { maxSteps: 10, maxModelCalls: 11, maxInputTokens: 12, maxCostUsd: 0.5, maxElapsedMs: 13 },
     guardrails: [{ labelContains: "删除", role: "button", reason: "别删东西" }],
@@ -282,8 +303,15 @@ test("全覆盖：每一个配方与每一处原始字段都落得下去", () =>
   );
 });
 
+test("登录态名字建议：取主机名第一段并规整成合法名字；推不出来给空串", () => {
+  assert.equal(core.suggestAuthName("https://shop_test9.example.com/products"), "shop-test9");
+  assert.equal(core.suggestAuthName("https://www.example.com/"), "example");
+  assert.equal(core.suggestAuthName("not a url"), "");
+  assert.equal(core.suggestAuthName("https://a.com/"), "");
+  assert.equal(core.suggestAuthName("http://127.0.0.1:8080/"), "");
+});
+
 test("空的 statusIn 必须原样活着——它不是「没设」，而是「任何结束方式都不接受」", () => {
-  const core = editorCore(JS);
   const def = CaseDefinitionSchema.parse({
     title: "空 statusIn",
     goal: "g",
@@ -296,4 +324,43 @@ test("空的 statusIn 必须原样活着——它不是「没设」，而是「�
     { trajectory: { statusIn: [], maxIdenticalConsecutive: 3 } },
     "空 statusIn 被丢掉了：断言会退回默认的 done，一条必然失败的检查就这样变成了会通过的条件",
   );
+});
+
+test("结果页从失败原因里读「这次运行带的登录态」：正则必须与 guard.ts 写出的文案对得上", () => {
+  // 两边各改各的不会报错，只会让「登录态过期了」被说成「用例没选登录态」——引导完全反了
+  const pattern = /\/用例已带登录态 \(\[a-z0-9\]\[a-z0-9-\]\*\)\//;
+  assert.match(JS, pattern, "app.js 里读登录态名字的正则变了，同步改这条测试与 guard.ts 的文案");
+  const read = /用例已带登录态 ([a-z0-9][a-z0-9-]*)/.exec(loginRedirectHint("shop-test9"));
+  assert.equal(read?.[1], "shop-test9");
+  assert.equal(/用例已带登录态 ([a-z0-9][a-z0-9-]*)/.exec(loginRedirectHint(undefined)), null);
+});
+
+test("字段路径译成人话：校验错误不再把 schema 路径甩给用户", () => {
+  assert.equal(core.fieldLabel("title"), "标题");
+  assert.equal(core.fieldLabel("allowedOrigins.1"), "域名白名单第 2 行");
+  assert.equal(core.fieldLabel("budget.maxSteps"), "预算：最多执行几步");
+  assert.equal(core.fieldLabel("guardrails.0.reason"), "第 1 条护栏的「拦下的理由」");
+  assert.equal(core.fieldLabel("assertions.final.text.contains.2"), "断言：第 3 条「页面包含文本」");
+  assert.equal(core.fieldLabel("assertions.final.controls.2.valueEquals"), "断言：第 3 条控件断言的「值等于」");
+  assert.equal(core.fieldLabel("assertions.trajectory.statusIn"), "断言：结束方式必须是");
+  assert.equal(core.fieldLabel("assertions.quality.minTargetProbability"), "断言：目标选择的最低概率");
+  // 译不出来就原样给路径，不编一个看起来像的名字
+  assert.equal(core.fieldLabel("somethingNew.x"), "somethingNew.x");
+});
+
+test("报告里的检查项键与编辑器用同一套名字", () => {
+  assert.equal(core.checkLabel("final.text.contains[0]"), "第 1 条「页面包含文本」");
+  assert.equal(core.checkLabel("trajectory.mustUse[1]"), "第 2 条「必须操作过」");
+  assert.equal(core.checkLabel("trajectory.statusIn"), "结束方式必须是");
+  assert.equal(core.checkLabel("quality.maxModelCalls"), "最多几次模型请求");
+});
+
+test("zod 的中文文案里最常见的几种再换成人话；认不出的原样保留", () => {
+  const empty = CaseDefinitionSchema.safeParse({ title: "", goal: "g", startUrl: "https://example.test/" });
+  assert.equal(empty.success, false);
+  const titleIssue = empty.error?.issues.find((issue) => issue.path.join(".") === "title");
+  assert.ok(titleIssue !== undefined);
+  assert.equal(core.issueMessage(titleIssue.message), "不能为空", `服务端文案变了：${titleIssue.message}`);
+  assert.equal(core.issueMessage("数值过小：期望 number >0"), "必须大于 0");
+  assert.equal(core.issueMessage("startUrl 必须是 http/https 的绝对地址"), "startUrl 必须是 http/https 的绝对地址");
 });

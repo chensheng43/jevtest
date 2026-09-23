@@ -26,7 +26,7 @@ runs/
   <runId>/
     run.json           完整报告（CaseRunReport）
     case.yaml          产生本次运行的用例冻结快照
-    frames/<n>.jpg     按需截图，序号对应 StepRecord.frame（默认关闭）
+    frames/<n>.jpg     每次观测一帧截图，序号对应 StepRecord.frame / finalFrame（默认开启）
     trace.zip          Playwright trace，npx playwright show-trace 可直接打开
 ```
 
@@ -39,8 +39,12 @@ runs/
 2. **落盘必须原子。** 先写临时文件再 `rename`。否则进程被中断会留下半截 `run.json`，
    列表页一读就崩——而崩溃发生在下一次打开界面时，跟真正的故障点已经隔了很远。
 
-3. **`frames/` 默认关闭。** 开启会让运行目录膨胀并拖慢每一步。事件里只带 `frame` 序号，
-   画面由前端另外请求，见 [`architecture.md §8.4`](architecture.md)。
+3. **`frames/` 默认开启**（`JEVTEST_RECORD_FRAMES`，`RunOptions.recordFrames` 可逐次覆盖）。
+   每次观测之后截一帧，序号从 0 单调递增、与步号无关——一步可能因陈旧决策被重新观测、截多帧。
+   帧是**操作前画面**：`StepRecord.frame` 是做这一步决策时看到的那一页；终止决策不产生
+   StepRecord，结束时那一页记在 `finalFrame`。截图失败只记一条 `run.log` warn、帧记 `null`，
+   不影响运行。代价是每步多几十毫秒（计入墙钟预算）和每帧约 100~150 KB 磁盘。
+   事件里只带 `frame` 序号，画面由前端另外请求，见 [`architecture.md §8.4`](architecture.md)。
 
 `index.jsonl` 的追加**由 runner 统一做**，不让各 worker 各写各的——并发追加会交错出坏行。
 读的时候坏行跳过，而不是让整个列表打不开（`core/report.ts` 的 `readIndex`）。
@@ -82,8 +86,15 @@ runs/
 | 执行 | `executed` / `blockReason` | `executed: false` = **浏览器没收到任何输入**，被护栏拦下了 |
 | 输入 | `text` / `textEngine` | TYPE_TEXT 实际输入的文本；`textEngine` 为生成它的引擎名 |
 | 时序 | `urlBefore` / `urlAfter` / `pageChanged` / `observedMs` / `engineLatencyMs` / `textLatencyMs` | `pageChanged` 为 `null` = 执行后观测失败（例如导航打断），**不代表动作没发生** |
-| 画面 | `frame` | 对应 `frames/<n>.jpg`；未开启截图为 `null` |
+| 提示 | `notices` | 执行后那次观测里可见的页面提示（toast / alert / 表单校验）。观测失败时缺省；早于这个字段的报告里没有它 |
+| 画面 | `frame` | **操作前画面**，对应 `frames/<n>.jpg`；未开启截图或截图失败为 `null` |
 | 成本 | `engineUsage` | 该步的 token / 金额 / 重试请求数 |
+
+终止决策（DONE / BLOCKED）不执行动作，因此不在 `steps` 里，单独记在 `terminalDecision`：
+`step` / `operation` / `operationProbability` / `operationProbabilities`（每个候选操作的概率）/
+`confidence` / `distribution` / `url` / `frame` / `engineLatencyMs` / `engineUsage`。
+排查「提前结束」时先看它：模型给 DONE 多少概率、次高的是什么。其它结束方式（预算、护栏、
+无进展、取消、故障）为 `null`；新鲜度复查时被丢弃的终止决策不记；早于这个字段的报告里没有它。
 
 > `pageChanged` 的三态（`true` / `false` / `null`）值得单独说：`null` 不是「没变化」，
 > 而是「没能观测」。无进展检测只应把 `false` 计入连续计数，把 `null` 当成 `false`
@@ -184,7 +195,7 @@ quality.maxInputTokens
 | 导出 | 实现 | 用途 |
 | --- | --- | --- |
 | Markdown | `toMarkdown(report)` | 贴进 PR 或 issue |
-| JUnit XML | `toJUnit(reports)` | CI 消费（P1） |
+| JUnit XML | `toJUnit(reports)` | CI 消费（**尚未实现**，导出端点回 501） |
 
 Markdown 摘要**必须**包含：结论、每条断言的实际值与期望、步数与成本、trace 的打开方式。
 失败时还要带上最终页面 URL 与关键元素的可见值——没有这些，一份失败报告对排查毫无帮助。
@@ -210,6 +221,7 @@ JUnit 的映射要点：
 | --- | --- |
 | `runId` / `caseId` / `caseTitle` / `suiteRunId` / `startedAt` | 定位 |
 | `status` / `passed` / `elapsedMs` / `steps` | 结论与规模 |
+| `inputTokens` / `outputTokens` | **`number \| null`**，取自 `stats`（含重试）。列表页的「Token」列用它，因为 TypeSafe 不报金额。`null` 只出现在加这两个字段之前的旧行上，`readIndex` 读时补成 `null` 而不是当坏行跳过 |
 | `costUsd` | **`number \| null`**，与报告里同一纪律：未知就是 `null` |
 
 ---
@@ -221,5 +233,4 @@ JUnit 的映射要点：
 3. 若改了 `assertion.checks` 的 key 生成规则，同步改 `core/checks.ts`、前端与本文——
    那是报告与界面之间的接口
 4. 若是**破坏性**变更，递增 `schemaVersion` 并写迁移说明（迁移落点是 `store/migrations.ts` 的
-   `REPORT_MIGRATIONS`，见 [architecture.md §11.2 ④](architecture.md)），
-   见 [`architecture.md §11.2`](architecture.md)）
+   `REPORT_MIGRATIONS`，见 [architecture.md §11.2 ④](architecture.md)）

@@ -18,7 +18,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 
 import { composeRunSignal, createRunnerService, DEFAULT_STOP_TIMEOUT_MS, failureReport } from "../src/core/runner.ts";
 import type { QueueStatus, RunnerService } from "../src/core/runner.ts";
@@ -52,8 +52,10 @@ function testSettings(overrides: Partial<Settings> = {}): Settings {
     headless: true,
     // 默认关掉 tracing：开了会去建 runs/<runId>/ 目录，而绝大多数测试不关心产物
     tracing: false,
+    recordFrames: false,
     casesDir: "./cases",
     runsDir: "./runs",
+    authDir: "./auth",
     defaultEngine: "scripted",
     ...overrides,
   };
@@ -146,6 +148,8 @@ interface Harness {
   events: RunEvent[];
   /** `persist` 收到的报告，按落盘顺序 */
   reports: CaseRunReport[];
+  /** `persist` 收到的「实际跑的那份」用例，与 reports 一一对应 */
+  ranCases: Case[];
   engines: EngineRecord[];
   settings: Settings;
 }
@@ -153,6 +157,7 @@ interface Harness {
 function makeHarness(input: {
   workers?: number;
   tracing?: boolean;
+  recordFrames?: boolean;
   runsDir?: string;
   steps?: ScriptedStep[] | ((caseDef: Case) => ScriptedStep[]);
   /** 每次借 context 时造一个 session。不给就造一个「两页、可点可填」的默认页 */
@@ -161,14 +166,18 @@ function makeHarness(input: {
   engineError?: Error;
   /** 让 persist 抛错（磁盘满 / 权限），用来验「落盘失败也要宣告结束」 */
   persistError?: Error;
+  /** 每次决策前等多久（毫秒）。用来让某个用例「跑得慢」，占住 worker */
+  decideDelayMs?: (caseDef: Case) => number;
 }): Harness {
   const settings = testSettings({
     ...(input.workers === undefined ? {} : { workers: input.workers }),
     ...(input.tracing === undefined ? {} : { tracing: input.tracing }),
+    ...(input.recordFrames === undefined ? {} : { recordFrames: input.recordFrames }),
     ...(input.runsDir === undefined ? {} : { runsDir: input.runsDir }),
   });
   const events: RunEvent[] = [];
   const reports: CaseRunReport[] = [];
+  const ranCases: Case[] = [];
   const engines: EngineRecord[] = [];
   const pool = new FakePool(
     input.session ??
@@ -194,7 +203,11 @@ function makeHarness(input: {
       return {
         name: inner.name,
         capabilities: inner.capabilities,
-        decide: (req, signal) => inner.decide(req, signal),
+        decide: async (req, signal) => {
+          const delay = input.decideDelayMs?.(caseDef) ?? 0;
+          if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
+          return await inner.decide(req, signal);
+        },
         writeText: (req, signal) => inner.writeText(req, signal),
         close: async () => {
           record.closed = true;
@@ -202,8 +215,9 @@ function makeHarness(input: {
         },
       };
     },
-    persist: async (report) => {
+    persist: async (report, ran) => {
       reports.push(report);
+      ranCases.push(ran);
       if (input.persistError !== undefined) throw input.persistError;
     },
     events: {
@@ -213,7 +227,7 @@ function makeHarness(input: {
     },
   });
 
-  return { runner, pool, events, reports, engines, settings };
+  return { runner, pool, events, reports, ranCases, engines, settings };
 }
 
 function clickLink(): ScriptedStep {
@@ -301,7 +315,8 @@ test("一次运行的数据流：queued -> started -> observed/decided/executed 
   assert.equal(harness.reports.length, 1, "persist 只被调用一次");
   assert.equal(report.artifacts.frozenCase, "case.yaml", "冻结用例的相对路径约定由 runner 保证");
   assert.equal(report.artifacts.traceZip, null, "未开 tracing 就没有 trace");
-  assert.equal(report.artifacts.framesDir, null, "截图通路未接，指向一个空目录等于让报告说谎");
+  assert.equal(report.artifacts.framesDir, null, "runner 不凭开关自称有帧：是否真有帧由 persist 实地看目录");
+  assert.equal(report.finalFrame, null, "没开截图就没有帧");
   assert.equal(report.caseRevision, 0, "revision/digest 由 persist 用 store.freeze() 定稿，runner 不编造");
   assert.equal(report.caseDigest, "");
 
@@ -367,6 +382,36 @@ test("批量入队：共用 suiteRunId，每个用例一个引擎实例，并发
   assert.equal(harness.runner.status().contextsActive, 0);
 
   harness.runner.cancelAll();
+  await harness.runner.stop();
+});
+
+test("persist 拿到的是入队时的那份用例（快照要冻结实际跑的版本）", async () => {
+  const harness = makeHarness({});
+  harness.runner.start();
+  const caseDef = makeCase({ goal: "入队时的目标" });
+  await runAll(harness, [caseDef]);
+  assert.equal(harness.ranCases.length, 1);
+  assert.equal(harness.ranCases[0], caseDef, "必须是入队时那个对象，而不是事后从仓库重读的");
+  await harness.runner.stop();
+});
+
+test("墙钟预算从开跑算起，不从入队算起：排在后面的用例不会因为排队而超时", async () => {
+  // 一个 worker；前一个用例每次决策慢 150ms，至少占住 worker 300ms。
+  // 后一个用例的墙钟预算只有 200ms——若从入队开始计时，它开跑时就已超限。
+  const harness = makeHarness({
+    workers: 1,
+    decideDelayMs: (caseDef) => (caseDef.id === "slow-case" ? 150 : 0),
+  });
+  harness.runner.start();
+
+  const slow = makeCase({ id: "slow-case" });
+  const tight = makeCase({ id: "tight-case", budget: { maxElapsedMs: 200 } });
+  const reports = await runAll(harness, [slow, tight]);
+  const tightReport = reports.find((report) => report.caseId === "tight-case");
+
+  assert.ok(tightReport !== undefined);
+  assert.equal(tightReport.status, "done", `排队时间被算进了预算：${tightReport.failureReason ?? ""}`);
+  assert.ok(tightReport.stats.elapsedMs < 200, `elapsedMs 不该含排队时间：${tightReport.stats.elapsedMs}`);
   await harness.runner.stop();
 });
 
@@ -722,6 +767,80 @@ test("tracing 开启时：trace 落在运行目录下，artifacts.traceZip 指�
   } finally {
     await rm(runsDir, { recursive: true, force: true });
   }
+});
+
+test("截图开启时：每次观测一帧落在 runs/<runId>/frames/<n>.jpg，报告里的帧号指向它们", async () => {
+  const runsDir = await mkdtemp(join(tmpdir(), "jevtest-runner-"));
+  try {
+    const harness = makeHarness({ recordFrames: true, runsDir });
+    harness.runner.start();
+    const report = (await runAll(harness, [makeCase()]))[0];
+    assert.ok(report !== undefined);
+
+    assert.equal(report.status, "done");
+    assert.equal(report.steps[0]?.frame, 0);
+    assert.equal(report.finalFrame, 1);
+    const framesDir = join(runsDir, report.runId, "frames");
+    assert.deepEqual((await readdir(framesDir)).sort(), ["0.jpg", "1.jpg"]);
+    assert.deepEqual([...(await readFile(join(framesDir, "0.jpg")))], [0xff, 0xd8, 0xff, 0xd9]);
+    harness.runner.cancelAll();
+    await harness.runner.stop();
+  } finally {
+    await rm(runsDir, { recursive: true, force: true });
+  }
+});
+
+test("截图：RunOptions.recordFrames 覆盖全局设置", async () => {
+  const runsDir = await mkdtemp(join(tmpdir(), "jevtest-runner-"));
+  try {
+    const harness = makeHarness({ recordFrames: true, runsDir });
+    harness.runner.start();
+    const { runId } = harness.runner.enqueue(makeCase(), { recordFrames: false });
+    await waitFor(() => harness.reports.some((candidate) => candidate.runId === runId), "报告落盘");
+    const report = harness.reports.find((candidate) => candidate.runId === runId);
+    assert.ok(report !== undefined);
+    assert.equal(report.steps[0]?.frame, null);
+    await assert.rejects(readdir(join(runsDir, runId, "frames")), "关掉截图就不建 frames 目录");
+    await harness.runner.stop();
+  } finally {
+    await rm(runsDir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 登录态
+// ---------------------------------------------------------------------------
+
+test("登录态：用例带 authState 时，按名字解析成 authDir 下的文件交给池；不带则不传", async () => {
+  const harness = makeHarness({});
+  harness.runner.start();
+  await runAll(harness, [makeCase({ id: "with-auth", authState: "shop-admin" }), makeCase({ id: "no-auth" })]);
+
+  const [withAuth, withoutAuth] = harness.pool.contextOptions;
+  assert.equal(withAuth?.storageStatePath, join("./auth", "shop-admin.json"));
+  assert.equal(withoutAuth?.storageStatePath, undefined, "没配登录态的用例必须是一个全新、未登录的浏览器");
+  harness.runner.cancelAll();
+  await harness.runner.stop();
+});
+
+test("一打开就被跳出白名单：失败原因指向「配登录态」，而不是只说越界", async () => {
+  const redirected = (): FakeSession =>
+    new FakeSession({ observations: [makeObservation({ url: "https://sso.other.test/login?next=x" })] });
+
+  const harness = makeHarness({ session: redirected });
+  harness.runner.start();
+  const [plain, withAuth] = await runAll(harness, [
+    makeCase({ id: "plain" }),
+    makeCase({ id: "expired", authState: "stale-login" }),
+  ]);
+
+  assert.equal(plain?.status, "guardrail_blocked");
+  assert.match(plain?.failureReason ?? "", /要求登录/);
+  assert.match(plain?.failureReason ?? "", /不要为此放宽白名单/);
+  assert.equal(withAuth?.status, "guardrail_blocked");
+  assert.match(withAuth?.failureReason ?? "", /stale-login.*过期/);
+  harness.runner.cancelAll();
+  await harness.runner.stop();
 });
 
 test("DEFAULT_STOP_TIMEOUT_MS：默认超时必须存在且大到一个正常的收尾不会误判", () => {

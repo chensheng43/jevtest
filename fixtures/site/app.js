@@ -73,6 +73,7 @@
     trapClicked: null,
     trapMoved: false,
     trapDisabled: false,
+    trapOccluded: false,
     trapDelayMs: TRAP_DELAY_MS,
   };
 
@@ -218,7 +219,7 @@
   // 陷阱元素
   // -------------------------------------------------------------------------
 
-  const traps = ["trap-mover", "trap-disable-later", "trap-occluded", "trap-offscreen"];
+  const traps = ["trap-mover", "trap-disable-later", "trap-covered", "trap-occluded", "trap-offscreen"];
   for (const id of traps) {
     $(id).addEventListener("click", () => {
       window.__fixture.trapClicked = id;
@@ -235,5 +236,10 @@
   setTimeout(() => {
     $("trap-disable-later").disabled = true;
     window.__fixture.trapDisabled = true;
+  }, TRAP_DELAY_MS);
+
+  setTimeout(() => {
+    $("trap-overlay").hidden = false;
+    window.__fixture.trapOccluded = true;
   }, TRAP_DELAY_MS);
 })();

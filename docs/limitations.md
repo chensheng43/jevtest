@@ -28,13 +28,13 @@
 
 ### 1. Shadow DOM
 
-**状态：不支持（P1 计划）**
+**状态：不支持（计划中）**
 
 `snapshot.js` 只遍历主文档的 `document.querySelectorAll`，不递归
 `element.shadowRoot`。因此 Web Components 内部的控件**根本不会进入元素表**，
 agent 看不见它们。
 
-P1 计划加约 10 行递归支持。届时需要考虑：
+计划加约 10 行递归支持。届时需要考虑：
 
 - 递归深度上限（嵌套 shadow root 可能很深）；
 - 与 `identity()` 的配合——WeakMap 对 shadow 内的节点一样有效；
@@ -42,17 +42,23 @@ P1 计划加约 10 行递归支持。届时需要考虑：
 
 ### 2. 跨域 iframe
 
-**状态：不支持（P1 计划用 `f1:e7` 形式支持同源）**
-
-跨域 iframe 内的 DOM 受同源策略保护，`page.evaluate` 在主文档上下文里读不到。
-目前只覆盖主文档。
+**状态：同源 iframe 已支持；跨域 iframe 不支持**
 
 需要区分两种情况：
 
-- **同源 iframe**：技术上可读，但目前没实现遍历。`admission.ts` 会报告
-  `frames > 1` 作为 warning。
+- **同源 iframe**：已支持。`snapshot.js` 在每个同源 frame 里各跑一次，元素与文本并进同一次观测：
+  元素 id 形如 `f1:e7`，正文里每个 iframe 一段、带一行 `[iframe f1: <标题>]`。
+  几何换算到顶层视口，命中测试逐层做到顶层——iframe 被父文档的遮罩或浮层盖住的部分同样点不到。
+  滚轮落点（见 §6）在 iframe 上时，SCROLL_DOWN / SCROLL_UP 与视口位置取自那个 iframe。
+  动作引出 iframe 加载时会等到它 `load`（上限 15s）；观测到白屏的大 iframe 时 agent 先等它渲染（上限 10s），
+  这期间不调用模型（decisions D27）。
+  边界：各 frame 分别读取，跨 frame 不是原子的（每个动作只按它所在 frame 的守卫判新鲜，
+  输入前还会重新做一遍命中测试）；iframe 带 CSS `transform` 缩放或旋转时坐标会算偏。
 - **跨域 iframe**：`page.frames()` 能**准确枚举**（这是 Playwright 比纯 JS 探测强的地方），
-  但内部控件读不到。若 goal 需要与其中的控件交互，直接判 blocking。
+  但内部控件读不到，也不去读（它不在 `allowedOrigins` 的约束范围内）。若 goal 需要与其中的控件交互，直接判 blocking。
+  运行中视口里出现 ≥50x50 的跨域 iframe 时，观测会带上 `unreadableFrames`：模型的提示里、
+  运行日志（warn）里、以 BLOCKED 结束时的失败原因里都会点明「有 N 个跨域 iframe 读不到」。
+  准入探测只在起始页做一次，拦不住运行中途才出现的 iframe，这条就是补它的。
 
 ### 3. Canvas / WebGL 应用
 
@@ -125,6 +131,12 @@ P1 计划加约 10 行递归支持。届时需要考虑：
 可以当作可访问性健康度的副产品来看。但如果一个控件连人都难以命名，
 不要指望 agent 能找到它。
 
+**无语义的可点元素**（没有 role、没有 href 的 `<li>` / `<div>`，点击靠事件委托）
+是另一种「看得见文字、没有 id 可点」：模型会转而去点名字最像的**别的**元素。
+`snapshot.js` 为此额外收 `cursor: pointer` 的元素（只收最外层、与语义候选不重叠、
+可访问名非空，role 记 `button`）。仍然看不见的：光标没设成 pointer 的可点元素、
+没有任何文本的图标按钮。
+
 ### 9. 其他
 
 | 能力 | 状态 |
@@ -133,27 +145,24 @@ P1 计划加约 10 行递归支持。届时需要考虑：
 | 测试数据准备与清理 | 不支持 |
 | 跨用例数据传递 | 不支持 |
 | 参数化用例 | 不支持 |
-| 登录态管理 | 底层 `storageState` 能力已规划，但无界面与用例字段 |
+| 登录态管理 | **已支持**：Web「登录态」页弹出有界面的浏览器让人登录一次，保存为命名的登录态，用例用 `authState` 引用。弹不出窗口的环境可上传 storageState。**不支持**：自动续期（过期要人重新登录）、按运行隔离的账号池 |
 | 多角色流程 | 不支持 |
 | 视觉回归（像素比对） | 不支持，且不在计划内 |
-| **报告里标注「这次运行停用过内置护栏」** | **没有落地。** `allowDefaultOverride: true` 确实会让内置护栏整套失效（`guard.ts` 的 `builtInDenyList`），但报告里没有任何字段记录这件事——`effectiveDenyList` 返回的 `overridden` 信号**只有测试在调用**，生产路径上没人消费它。于是「护栏被关掉的那次运行」与「护栏生效的那次运行」在报告里长得一模一样。`guard.ts:20` 与 `case.ts:139` 的注释都写着「报告顶部会打红色横幅」，那句目前是假的。编辑器的 `allowDefaultOverride` 说明已按实际改写并点名了这个缺口；要真补上，需要给 `CaseRunReport` 加一个字段并在结果页渲染它 |
+| **报告里标注「这次运行停用过内置护栏」** | **没有落地。** `allowDefaultOverride: true` 确实会让内置护栏整套失效（`guard.ts` 的 `builtInDenyList`），但报告里没有任何字段记录这件事——`effectiveDenyList` 返回的 `overridden` 信号**只有测试在调用**，生产路径上没人消费它。于是「护栏被关掉的那次运行」与「护栏生效的那次运行」在报告里长得一模一样。编辑器的 `allowDefaultOverride` 说明里点名了这个缺口；要补上，需要给 `CaseRunReport` 加一个字段并在结果页渲染它 |
 
 ---
 
 ## 用例准入清单
 
-**本表是准入判定的权威来源。** `src/browser/admission.ts` 的规则必须以此为准，
-改本表就要同步改它，反之亦然。
-
-> 这两处目前靠人工同步——**本身就是一处待消灭的双事实来源**，正是 D5 想避免的东西。
-> 建议把规则写成数据（`ADMISSION_RULES`，每条含 `id` / 判定 / 文案），文档从它生成。
-> 见 [architecture.md §11.2](architecture.md)。
+本表与 `src/browser/admission.ts` 的 `ADMISSION_RULES` 描述同一套规则，改一处就要同步改另一处。
+规则表里每条的 `rationale` 都必须指向本文的具体小节（`tests/admission.test.ts` 会检查）；
+本表尚未从规则表自动生成，这一段仍靠人工同步。
 
 写新用例前逐条过一遍。任一条命中「blocking」就不该写成 jevtest 用例。
 
 | 检查 | 结论 |
 | --- | --- |
-| 目标控件在 shadow DOM 里？ | 🚫 blocking（P1 后重估） |
+| 目标控件在 shadow DOM 里？ | 🚫 blocking（支持后重估） |
 | 目标控件在跨域 iframe 里？ | 🚫 blocking |
 | 页面是 canvas / WebGL 渲染的？ | 🚫 blocking |
 | 需要上传文件？ | 🚫 blocking |

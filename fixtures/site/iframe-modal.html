@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>弹窗里的 iframe</title>
+  <style>
+    body { margin: 0; padding: 16px; font: 14px/1.5 sans-serif; }
+    /* 遮罩盖住整个主文档：弹窗打开后主文档里的东西一个都点不到 */
+    .mask { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.4); }
+    .mask[hidden] { display: none; }
+    /* 边框与内边距都不为 0：iframe 内容区原点 = 边框盒 + clientLeft + paddingLeft，换算少一项就点偏 */
+    .modal { position: fixed; top: 40px; left: 40px; width: 1040px; height: 700px; padding: 6px; border: 4px solid #ccc; background: #fff; }
+    .modal iframe { box-sizing: border-box; width: 100%; height: 100%; padding: 5px; border: 3px solid #888; }
+    /* 父文档里的浮层盖住 iframe 右上角：iframe 里被它盖住的按钮在顶层点不到 */
+    .toast { position: fixed; top: 60px; left: 700px; width: 300px; height: 60px; background: #333; color: #fff; }
+  </style>
+</head>
+<body>
+  <h1>刊登管理</h1>
+  <button type="button" id="add">+ 添加产品</button>
+
+  <!-- 来自一次真跑：「添加产品」的表单整个在弹窗的 iframe 里，iframe 文档要 1.7s～2.2s 才回来。
+       `?src=` 覆写 iframe 地址：更慢的文档、先白屏再显示的表单、一直空白的 about:blank -->
+  <div class="mask" id="mask" hidden>
+    <div class="modal"><iframe id="form" title="添加产品"></iframe></div>
+    <div class="toast">保存前请检查站点</div>
+  </div>
+
+  <script>
+    document.getElementById("add").addEventListener("click", () => {
+      document.getElementById("mask").hidden = false;
+      // 真实页面在点击处理器的下一拍才给 iframe 设 src；文档本身是个慢请求
+      const src = new URLSearchParams(location.search).get("src") ?? "iframe-form.html?delay=600";
+      setTimeout(() => {
+        document.getElementById("form").src = src;
+      }, 0);
+    });
+  </script>
+</body>
+</html>

@@ -414,6 +414,20 @@ test("报告的每一种 null 都是有效取值，不是缺失", () => {
   assert.equal(parsed.stats.costUsd, null);
 });
 
+test("steps[].notices 可选：新报告带着能读回，老报告没有它也能读", () => {
+  const withNotices = { ...FULL_REPORT, steps: [{ ...FULL_REPORT.steps[0]!, notices: ["请输入SKU"] }] };
+  assert.deepEqual(reportSchema.parse(withNotices).steps[0]?.notices, ["请输入SKU"]);
+
+  const { notices: _notices, ...legacyStep } = { ...FULL_REPORT.steps[0]!, notices: [] as string[] };
+  const legacy = reportSchema.parse({ ...FULL_REPORT, steps: [legacyStep] });
+  assert.equal(legacy.steps[0]?.notices, undefined);
+
+  assert.throws(
+    () => reportSchema.parse({ ...FULL_REPORT, steps: [{ ...FULL_REPORT.steps[0]!, notices: "请输入SKU" }] }),
+    ZodError,
+  );
+});
+
 test("assertion.passed 是三态：有检查被跳过时整体是 null", () => {
   const undecided: CaseRunReport = {
     ...FULL_REPORT,
@@ -469,6 +483,8 @@ const INDEX_ENTRY: RunIndexEntry = {
   passed: true,
   elapsedMs: 4000,
   steps: 2,
+  inputTokens: 33859,
+  outputTokens: 2663,
   costUsd: 0.0012,
 };
 

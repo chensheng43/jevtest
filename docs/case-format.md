@@ -2,22 +2,12 @@
 
 **本文是用例格式的权威定义。** YAML 文件、Web 表单、CLI 三条入口最终都归一到
 同一份 schema（`src/schema/case.ts`）。改 schema 必须同步改本文；
-`tests/schema.test.ts` 会用「解析 → 渲染表单 → 反解 → 深度比较」锁死两者一致。
+`tests/schema.test.ts` 逐条核对本文列出的默认值，`tests/frontend.test.ts` 核对表单载入再保存不改变用例。
 
 一个完整的例子见 [`cases/wikipedia-godel.yaml`](../cases/wikipedia-godel.yaml)。
 
 输出侧的对称文档是 [`report-format.md`](report-format.md)——那是运行产出物的权威定义。
 本文管**输入**（你写什么 YAML），它管**输出**（你读出什么 JSON）。
-
-> **为什么没有 `engineOptions`：** 曾经设计过一个自由形态的
-> `engineOptions: Record<string, unknown>` 用来给 `scripted` 测试引擎传答案序列，
-> **已决定不采用**。理由：用例是给用户写的，用户不该在 YAML 里看到「答案序列」
-> 这种测试脚手架；而且往「YAML 是唯一事实来源」里加自由形态字段，要穿过 YAML 往返、
-> 冻结用例快照、`caseDigest` 三关，代价与收益不成比例。
->
-> 测试引擎改走 `RunnerDeps.createEngine` 注入（那本来就是现成的注入点），
-> **生产用例永不声明 `engine: scripted`**。详见
-> [architecture.md §11.1 ④](architecture.md)。
 
 ---
 
@@ -32,11 +22,32 @@
 | `startUrl` | string (URL) | **是** | — | 起始地址 |
 | `mode` | `interactive` \| `readonly` | 否 | `interactive` | 见下方 |
 | `allowedOrigins` | string[] | 否 | `[startUrl 的 origin]` | 域名白名单 |
+| `authState` | string | 否 | （无：未登录的全新浏览器） | 登录态的**名字**，见下方 |
 | `budget` | object | 否 | 见下方 | 成本与规模上限 |
 | `guardrails` | Guardrail[] | 否 | `[]` | 追加在**内置默认集之上** |
 | `allowDefaultOverride` | boolean | 否 | `false` | 是否允许移除内置护栏。慎用 |
 | `engine` | string | 否 | `settings.defaultEngine` | 决策引擎名 |
 | `assertions` | object | 否 | `{}` | 三层断言，见下方 |
+
+### 关于 `authState`
+
+目标页面需要登录时用它。值是 Web「登录态」页里的一份登录态的**名字**，不是文件路径——
+运行时解析成 `<JEVTEST_AUTH_DIR>/<名字>.json`，载入其中的 cookie 与 localStorage 后再打开 `startUrl`。
+名字规则与 `id` 相同（小写字母、数字、连字符，2~64 位）。
+
+- **只收名字**：用例可以从 Web 端创建，收路径就等于允许用例指向本机任意文件。
+- **只读载入**：运行中的登出、会话轮换不会写回文件，多个用例共用一份互不影响。
+- **不要把账号密码写进 `goal`**：goal 会发给模型厂商、进报告。登录由人在弹出的浏览器里完成一次，
+  密码从不经过本平台。
+- **不要为了登录放宽 `allowedOrigins`**：没有登录态时站点会把你重定向到登录页 / SSO 域，
+  白名单拦下它是对的。该做的是配登录态。
+- 引用的登录态不存在时，运行以 `error` 结束并提示去登录；登录态过期时，运行通常在第 0 步以
+  `guardrail_blocked` 结束，失败原因会提示重新登录。
+
+```yaml
+startUrl: https://shop_test9.example.com/products
+authState: shop-test9-admin
+```
 
 ### 关于 `goal`
 
@@ -63,10 +74,8 @@
 `{button, checkbox, radio, switch, combobox, menuitem, menuitemradio, menuitemcheckbox, option, gridcell}`
 的 click。
 
-后四个（ARIA 的选项、菜单单/复选项，以及日历与表格的可选单元格）不在最初的设计清单里，
-是**实践补上的**：它们的点击同样会改变被提交的值，少列一个，只读用例就能悄悄改掉页面状态，
-而报告里那句「本运行不可能发生变更」就变成了假话。清单的权威定义在
-`src/core/policy.ts` 的 `READONLY_BLOCKED_CLICK_ROLES`，改它必须同步改本文。
+清单的权威定义在 `src/core/policy.ts` 的 `READONLY_BLOCKED_CLICK_ROLES`，改它必须同步改本文
+（`tests/policy.test.ts` 会比对）。后四个为什么也要剔除，见 [`decisions.md` D17](decisions.md)。
 
 刻意**不**剔除的：`link`（导航）、`tab`（切换可见面板，等同导航）、
 `textbox` / `searchbox` / `spinbutton`（点击只是聚焦；输入才是变更，而输入走 `fill` 那条路径）。
@@ -132,8 +141,8 @@ guardrails:
 内置集覆盖破坏性动词（delete / purchase / pay / checkout / place order /
 transfer / 删除 / 支付 / 下单……）与敏感输入（密码框、文件上传）。
 
-用例**只能追加，不能移除**。要移除必须显式设置 `allowDefaultOverride: true`，
-且报告顶部会打红色横幅。
+用例**只能追加，不能移除**。要移除必须显式设置 `allowDefaultOverride: true`。
+注意它是**整套停用**，不是删掉其中几条。按设计报告顶部应打红色横幅（**尚未落地**：报告目前不记录这件事，见 [limitations.md §9](limitations.md)）。
 
 这个设计是为了让「悄悄关掉安全网」变得困难：默认安全，放弃安全需要明说。
 
@@ -269,8 +278,8 @@ assertions:
 | --- | --- |
 | `queued` | 已入队 |
 | `running` | 执行中 |
-| `done` | 模型选择了 DONE，且页面在决策后未变化 |
-| `blocked` | 模型选择了 BLOCKED，或连续多步无进展 |
+| `done` | 模型选择了 DONE（概率须过半，见 decisions.md D25），且页面在决策后未变化 |
+| `blocked` | 模型选择了 BLOCKED（概率须过半，见 decisions.md D20），或连续多步无进展，或连续 3 次决策在执行前被丢弃（目标被遮挡 / 页面已变，见 D21） |
 | `budget_exceeded` | 撞到预算上限 |
 | `guardrail_blocked` | 被安全护栏拦截 |
 | `cancelled` | 用户取消 |
@@ -293,12 +302,10 @@ assertions:
 目前 `skipped` 的唯一来源是引擎的概率分布为 `degenerate` 时的概率类检查。
 
 `AssertionResult.passed` 因而是 **`boolean | null`**：
-有失败 → `false`；无失败但有跳过 → **`null`（未判定）**；全通过 → `true`。
-聚合规则见 [architecture.md §11.1 ⑤](architecture.md)。
+有失败 → `false`；无失败但有跳过 → **`null`（未判定）**；全通过 → `true`
+（[`report-format.md` §2.6](report-format.md)）。
 
-**报告里必须把 `skipped` 显示为「跳过」，绝不能显示为「通过」。**
-把 `skipped` 当 `passed` 会让报告谎报覆盖——比直接失败更危险，
-因为它让人以为测过了而实际没有。
+**报告里必须把 `skipped` 显示为「跳过」，绝不能显示为「通过」**（[`decisions.md` D9](decisions.md)）。
 
 ### 常见组合
 

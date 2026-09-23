@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>晚到的弹窗内容</title>
+  <style>
+    body { margin: 0; padding: 16px; font: 14px/1.5 sans-serif; }
+    .modal { position: fixed; top: 60px; left: 80px; width: 600px; padding: 16px; background: #fff; border: 1px solid #ccc; }
+    .modal[hidden] { display: none; }
+  </style>
+</head>
+<body>
+  <h1>产品采集</h1>
+  <button type="button" id="open">导入eBay产品库</button>
+  <!-- 动作引出的请求迟迟不回：动作之后的等待必须按上限放行，而不是一直挂着 -->
+  <button type="button" id="slow">刷新统计</button>
+  <p id="stats"></p>
+
+  <!-- 来自一次真跑：弹窗外壳（标题 + 关闭 / 确定）立刻出现，SKU 选项等接口回来才渲染 -->
+  <div class="modal" id="modal" hidden>
+    <h2>将采集信息导入eBay产品库</h2>
+    <div id="body"></div>
+    <button type="button" id="close">关闭</button>
+    <button type="button">确定</button>
+  </div>
+
+  <script>
+    const modal = document.getElementById("modal");
+    document.getElementById("open").addEventListener("click", () => {
+      modal.hidden = false;
+      // 真实页面的请求常在点击处理器的下一拍才发出
+      setTimeout(() => {
+        fetch("dialog.json?delay=800")
+          .then((response) => response.json())
+          .then((data) => {
+            for (const option of data.options) {
+              const label = document.createElement("label");
+              const radio = document.createElement("input");
+              radio.type = "radio";
+              radio.name = "sku";
+              label.append(radio, option);
+              document.getElementById("body").append(label);
+            }
+          });
+      }, 0);
+    });
+    document.getElementById("close").addEventListener("click", () => {
+      modal.hidden = true;
+    });
+    document.getElementById("slow").addEventListener("click", () => {
+      fetch("dialog.json?delay=5000").then(() => {
+        document.getElementById("stats").textContent = "统计已刷新";
+      });
+    });
+  </script>
+</body>
+</html>

@@ -39,6 +39,7 @@ const CASE_KEYS = [
   "startUrl",
   "mode",
   "allowedOrigins",
+  "authState",
   "budget",
   "guardrails",
   "allowDefaultOverride",

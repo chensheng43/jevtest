@@ -1,14 +1,12 @@
 # HTTP API 参考
 
-本地服务的 REST 端点。**前端与 CLI 共用同一套**——`jevtest doctor` 打 `/api/health`，
-`jevtest run` 走 `/api/runs`。CI 不依赖界面，因此**状态码必须正确**，它是判断成败的依据。
+本地服务的 REST 端点，供前端使用。**状态码必须正确**——脚本与 CI 靠它判断成败。
 
 实现集中在 [`src/web/api.ts`](../src/web/api.ts)（唯一入口 `handle()`），
 路由与守卫在 [`src/web/server.ts`](../src/web/server.ts)。
 
-> **本文件的状态标记。** 端点清单与守卫规则来自代码，已确定；
-> 请求/响应体凡是能从现有类型（`CaseDefinition`、`CaseRunReport`、`QueueStatus`…）
-> 推导的就标**已定**，推导不出的标 **待定**——待定的部分**尚未拍板，不要照猜实现**。
+CLI 不经过 HTTP：`run` / `validate` / `import` 直接调用同一套模块，
+`doctor` 调同一个 `handle()` 但不经网络（[`decisions.md` D16](decisions.md)）。
 
 ---
 
@@ -37,8 +35,7 @@
 校验失败时，`detail` 里带 zod 的 **issue 路径**（如
 `assertions.final.controls.2.valueEquals`），前端据此高亮表单字段。
 
-> **服务端校验永远要重新跑一遍**，即使前端用同一份 schema 校验过。
-> 前端那份只是即时反馈，**不是信任边界**。
+> **服务端校验是唯一的信任边界。** 前端的必填标红只是即时反馈。
 
 ### 1.3 二进制端点
 
@@ -69,7 +66,7 @@
 
 | 方法 | 路径 | 说明 | 契约 |
 | --- | --- | --- | --- |
-| GET | `/api/health` | 健康检查。CLI `doctor` 也用它 | **待定** |
+| GET | `/api/health` | 健康检查：Node 版本、并发与录制配置、用例/运行目录、缺哪些凭证。CLI `doctor` 也用它 | 已定（`web/api.ts`） |
 | GET | `/api/engines` | 已注册引擎与各自能力 | **已定** |
 
 `GET /api/engines` 的响应即 `registry.listEngines()` 的返回值：
@@ -122,16 +119,8 @@
 `POST /api/cases/:id/admit` **不运行用例、不调用模型**，只是一次只读的页面探测，
 所以可以在表单里做一个「检测页面」按钮随手点。
 
-> 用例的读写由 `src/store/cases.ts`（`CaseStore`）负责，落点见
-> [`architecture.md §11.2 ①`](architecture.md)。上表里的「文件落盘 / revision / slug 冲突」
-> 都由它实现——**这三条入口（表单、CLI、导入）最终都落到同一个 `write()`**，
-> 这是 D5「YAML 是唯一事实来源」真正被守住的地方。
->
-> ⚠️ **CLI 不经过 HTTP。** `jevtest run` / `validate` / `import` 直接调用同一套模块
-> （`cli.ts` 的 `createWiring`），`doctor` 调的是 `web/api.ts` 的 `handle()` 但**不经网络**。
-> 理由：为了跑一个用例去绑端口、生成令牌、再让一个浏览器都还没起的 HTTP 服务转发一次，
-> 只增加失败面，而 CI 里并行跑多个 jevtest 时还会撞端口。
-> 于是「前端与 CLI 共用同一套」在**语义与业务逻辑上成立**，在传输层不成立。
+> 落盘、revision、id 冲突都由 `src/store/cases.ts` 的 `CaseStore` 实现，
+> 表单、CLI、导入三条入口最终落到同一个 `write()`（[`architecture.md §11.2 ①`](architecture.md)）。
 
 ### 3.3 运行
 
@@ -151,7 +140,7 @@
 | `GET /api/runs/:id` | — | `CaseRunReport` | 已定 |
 | `GET /api/runs/:id/events?since=N` | `since` = 上次拿到的 `seq` | `SeqEvent[]` | 已定 |
 | `POST /api/runs/:id/cancel` | — | `boolean`（是否成功请求取消） | 已定 |
-| `GET /api/runs/:id/export?format=md\|junit` | `format` | `text/markdown` 或 `application/xml` | 已定 |
+| `GET /api/runs/:id/export?format=md\|junit` | `format` | `text/markdown`；`junit` 尚未实现，回 `501` | 已定 |
 
 `RunOptions`：`{ recordFrames?, engineOverride?, suiteRunId? }`。**`engineOverride` 用于同一用例的 A/B 对比**。
 
@@ -194,6 +183,43 @@ switch 分支与 `schema/events.ts` 的判别联合一一对应。
 `trace.zip` 可用 `npx playwright show-trace` 直接打开，带时间轴与每步 DOM 快照——
 **排查任何失败都先看它**，比读报告快得多。
 
+### 3.6 登录态
+
+用例用 `authState: <名字>` 引用一份登录态（见 [`case-format.md`](case-format.md)）。
+**任何响应都不含 cookie 值**，只有摘要 `AuthStateSummary`：
+
+```ts
+{
+  name: string, loginUrl: string | null, source: "login" | "import", savedAt: string,
+  cookieCount: number, sites: string[], earliestExpiry: string | null, hasSessionCookies: boolean,
+  lastVerified: { at, ok, url, finalUrl, detail } | null,
+  usedBy: { id: string, title: string }[]   // 列表与单个查询时附带
+}
+```
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/api/auth-states` | 列表 |
+| POST | `/api/auth-states` | 上传 `{ name, state, loginUrl?, overwrite? }`。`state` 是 storageState 对象或其 JSON 文本。同名已存在且未带 `overwrite: true` 时 **409**。**本端点请求体上限 1MB**，其余仍是 8KB |
+| GET | `/api/auth-states/:name` | 单个 |
+| POST | `/api/auth-states/:name/verify` | `{ url? }`，缺省用 `loginUrl`。用这份登录态无头打开地址：最终 origin 不变且页面没有密码框才算 `ok`。**不调用模型** |
+| DELETE | `/api/auth-states/:name` | 仍被用例引用时 **409**（`detail.usedBy`），带 `?force=1` 才删 |
+
+登录窗口。服务只监听 127.0.0.1，所以服务端弹出的窗口就在操作 Web 的人桌面上；
+同一时刻只开一个：
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/api/auth-window` | `LoginWindowStatus \| null`：`{ name, url, startedAt, state: "open" \| "closed", currentUrl, closedReason }`。`closed` = 人把窗口关了或 30 分钟超时，**没有保存** |
+| POST | `/api/auth-window` | `{ name, url, overwrite? }` 弹出有界面的浏览器并打开 `url`。同名已存在且未带 `overwrite` 时 **409**（`detail.exists`，在弹窗**之前**判）；已有窗口开着时 **409**（`detail.window`）；弹不出来（无图形界面）时 **502** |
+| POST | `/api/auth-window/save` | 导出登录态、落盘、关窗，返回摘要。没有开着的窗口时 **409** |
+| POST | `/api/auth-window/cancel` | 关窗，不保存 |
+
+登录窗口不挂在 `/api/auth-states/` 下：`login`、`import` 本身是合法的登录态名字，挂在同一层会与 `:name` 撞路由。
+
+`POST /api/cases/:id/admit` 同样带着用例的登录态探测；打开 `startUrl` 后被跳出白名单时，
+在 `blocking` 首条说明，并在响应里附 `redirectedTo`（否则为 `null`）。
+
 ---
 
 ## 4. 非 `/api` 路径
@@ -201,13 +227,7 @@ switch 分支与 `schema/events.ts` 的判别联合一一对应。
 | 路径 | 说明 |
 | --- | --- |
 | `/` 及静态资源 | `src/web/public/`，原生 HTML/CSS/JS。读取时把 `__JEVTEST_TOKEN__` 占位符替换为真实令牌 |
-| `/vendor/*` | 动态文件服务，从 `node_modules` 取前端资产：原先只为把 zod 喂给浏览器做表单即时校验，D18 之后同时供 Bootstrap 的样式表。**是全项目唯一的目录穿越风险点**，必须校验解析后的前缀在允许目录内且只放行 `.js` / `.map` / `.json` / `.css` |
-
-> `/vendor/*` 的收益与风险值得重新算账：它存在的理由只是省掉前端一份很薄的校验，
-> 而那份校验**本来就不是信任边界**（见 §1.2）。D18 之后它服务的东西变多了
-> （多了 Bootstrap 的 CSS），但风险面没有质变——仍然只读静态文件，且放行的
-> 扩展名里没有会被执行或会被注入令牌的那几种。见
-> [`security.md`](security.md) 的「已知攻击面与残余风险」。
+| `/vendor/*` | 从 `node_modules` 取前端资产，目前只有 Bootstrap 的样式表（D18）。**是全项目唯一的目录穿越风险点**，必须校验解析后的前缀在允许目录内且只放行 `.js` / `.map` / `.json` / `.css`。风险评估见 [`security.md` §5](security.md) |
 
 ---
 
@@ -218,7 +238,7 @@ switch 分支与 `schema/events.ts` 的判别联合一一对应。
 
 | 能力 | 状态 |
 | --- | --- |
-| 登录态管理（`storageState` 上传/复用） | 底层能力已规划，无端点与用例字段 |
+| 登录态自动续期 | 无。过期后由人重新登录（§3.6） |
 | 套件（一组用例）的增删改 | 无。`suiteRunId` 只是批量运行的关联 id，不是持久化实体 |
-| 用例 revision 的 diff 视图 | P1 |
+| 用例 revision 的 diff 视图 | 未实现 |
 | 权限 / 多用户 | 无。单机工具，靠 §2 的三重守卫保护 |

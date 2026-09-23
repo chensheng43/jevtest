@@ -46,8 +46,10 @@ function settingsWith(over: Partial<Settings> = {}): Settings {
     maxEngineInflight: 4,
     headless: true,
     tracing: false,
+    recordFrames: false,
     casesDir: "./cases",
     runsDir: "./runs",
+    authDir: "./auth",
     defaultEngine: TYPESAFE_ENGINE_NAME,
   };
   return Object.assign(base, over);

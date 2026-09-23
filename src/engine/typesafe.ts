@@ -35,7 +35,8 @@
  */
 
 import type { BudgetView, DecisionEngine, DecisionRequest, DecisionResult, Option, Question, TextRequest, TextResult } from "./types.ts";
-import type { Answer } from "./types.ts";
+import type { Answer, RecentActionIR } from "./types.ts";
+import { attachFailedCallUsage } from "./types.ts";
 import type { Usage } from "../schema/report.ts";
 import { TEXT_VALUE } from "../core/rules.ts";
 import { Semaphore } from "../util/async.ts";
@@ -158,9 +159,17 @@ export function createTypeSafeEngine(options: TypeSafeOptions): DecisionEngine {
         what: "决策",
       });
 
+      // 响应已经拿到（已计费），映射失败也要把这次的用量交给调用方记账
+      const usage = extractUsage(json, requests);
+      let answers: DecisionResult["answers"];
+      try {
+        answers = mapAnswers(json, req.questions);
+      } catch (error) {
+        throw attachFailedCallUsage(error, { usage, latencyMs: performance.now() - started });
+      }
       return {
-        answers: mapAnswers(json, req.questions),
-        usage: extractUsage(json, requests),
+        answers,
+        usage,
         latencyMs: performance.now() - started,
         engine: TYPESAFE_ENGINE_NAME,
         // 原始响应只进 trace。**绝不参与执行**：执行用的是校验过的 Answer。
@@ -176,7 +185,7 @@ export function createTypeSafeEngine(options: TypeSafeOptions): DecisionEngine {
           `未配置文本模型，需要 TYPE_TEXT 的用例无法运行：这一步要在字段「${req.field.label}」` +
             `（role: ${req.field.role}）里输入取值，而没有文本模型就无法生成它。` +
             `请配置 TYPE_TEXT 所需的三项（见 .env.example）：textModelApiKey / textModelBaseUrl / textModel` +
-            `（环境变量 JEVTEST_TEXT_MODEL_API_KEY / JEVTEST_TEXT_MODEL_BASE_URL / JEVTEST_TEXT_MODEL），` +
+            `（环境变量 TEXT_MODEL_API_KEY / TEXT_MODEL_BASE_URL / TEXT_MODEL），` +
             `并用 \`jevtest doctor\` 复查。**绝不猜一个值。**`,
         );
       }
@@ -193,10 +202,24 @@ export function createTypeSafeEngine(options: TypeSafeOptions): DecisionEngine {
         what: "文本取值",
       });
 
-      const parsed = parseTextHelperOutput(readChatContent(json));
+      const usage = extractUsage(json, requests);
+      let parsed: ReturnType<typeof parseTextHelperOutput>;
+      try {
+        parsed = parseTextHelperOutput(readChatContent(json));
+      } catch (error) {
+        // 与 decide 同理：响应已计费。包成 EngineRequestError，保留「没有浏览器动作」这条信号
+        const wrapped =
+          error instanceof EngineRequestError
+            ? error
+            : new EngineRequestError(
+                `文本取值的响应无法解析：${error instanceof Error ? error.message : String(error)}。**没有任何浏览器动作被执行。**`,
+                { cause: error },
+              );
+        throw attachFailedCallUsage(wrapped, { usage, latencyMs: performance.now() - started });
+      }
       return {
         text: parsed.text,
-        usage: extractUsage(json, requests),
+        usage,
         latencyMs: performance.now() - started,
         engine: TYPESAFE_ENGINE_NAME,
       };
@@ -234,13 +257,13 @@ function buildDecisionBody(model: string, req: DecisionRequest): Record<string, 
       page: {
         url: req.state.url,
         title: req.state.title,
-        text: trimPageText(req.state.text, req.budget),
+        text: withPreamble(req.state, trimPageText(req.state.text, req.budget)),
       },
       // 元素表原样透传：它的字段名（index/label/role/operations/options）
       // 已经就是「给模型看的形状」，多一层改名只会多一处漂移的地方。
       elements: req.state.elements,
       recent_actions: req.state.recentActions.map((entry) => ({
-        action: entry.action,
+        action: actionWithNotices(entry),
         kind: entry.kind,
         text: entry.text,
         page_changed: entry.pageChanged,
@@ -252,6 +275,74 @@ function buildDecisionBody(model: string, req: DecisionRequest): Record<string, 
     // 多一个就是给一个严格校验的服务端多一个拒绝的理由，而它有且只有一个
     // 模糊的报错（Invalid request.），排查代价全在我们这一侧。
   };
+}
+
+/**
+ * 页面提示、读不到的 iframe 与视口位置置顶。上游的 `state.page` 只有 url / title / text 三个键，而服务端对多余的键
+ * 只回一句 `Invalid request.`（见 buildDecisionBody 末尾），所以它们只能拼进 text。
+ * 放在最前面、不参与裁剪：它们最短，提示最可能解释「为什么上一步没成」，
+ * 位置告诉模型「视口外还有东西」（见 scrollPosition）。
+ *
+ * 标题里写明「可能与当前任务无关」：通知中心的推送（例如后台任务的「成功5个」）同样是
+ * 浮层 toast，snapshot.js 分不开。一次真跑里模型把这样一条无关的「成功」当成了
+ * 目标要的「导入完成提示」，弹窗里的「确定」还没点就回了 DONE。
+ */
+function withPreamble(state: DecisionRequest["state"], text: string): string {
+  const sections: string[] = [];
+  if (state.notices.length > 0) {
+    sections.push(
+      `Notices currently shown on the page (toasts / alerts / validation; may include unrelated background notifications):\n${state.notices
+        .map((notice) => `- ${notice}`)
+        .join("\n")}`,
+    );
+  }
+  // 跨域 iframe 读不到：不说的话，模型只会觉得「页面上没东西可点」，而不知道是看不见
+  const unreadable = state.unreadableFrames ?? 0;
+  if (unreadable > 0) {
+    sections.push(
+      `${unreadable} embedded cross-origin frame(s) on this page cannot be read: ` +
+        `their contents are not in the element list or page text and cannot be operated.`,
+    );
+  }
+  const position = scrollPosition(state.scroll);
+  if (position !== null) sections.push(position);
+  if (sections.length === 0) return text;
+  return `${sections.join("\n\n")}\n\nPage text:\n${text}`;
+}
+
+/** 视口上下不足这么多像素时不提：几十像素的余量多半是边距，报出来只会诱导无谓的滚动 */
+const SCROLL_HINT_MIN_PX = 40;
+
+/**
+ * 视口在整页里的位置，拼在提示后面、正文前面。理由同 `withPreamble`：`state.page` 没有别的键可用。
+ *
+ * 元素表与正文都只含视口里的东西。一次真跑里目标要「勾选前 2 个产品」，第 2 行在首屏之下，
+ * 模型看不到它、也不知道下面还有内容，勾完第 1 行就去点「批量导入」了。
+ */
+function scrollPosition(scroll: DecisionRequest["state"]["scroll"]): string | null {
+  const above = Math.max(0, Math.round(scroll.y));
+  const below = Math.max(0, Math.round(scroll.height - scroll.y - scroll.viewportHeight));
+  if (above < SCROLL_HINT_MIN_PX && below < SCROLL_HINT_MIN_PX) return null;
+  const parts = [
+    `Elements and page text cover only the visible viewport ` +
+      `(${Math.round(scroll.viewportHeight)}px of a ${Math.round(scroll.height)}px-tall page).`,
+  ];
+  if (above >= SCROLL_HINT_MIN_PX) parts.push(`About ${above}px of content is above (SCROLL_UP to see it).`);
+  if (below >= SCROLL_HINT_MIN_PX) parts.push(`About ${below}px of content is below (SCROLL_DOWN to see it).`);
+  return parts.join(" ");
+}
+
+/**
+ * 近期动作的 `action` 串，带上这一步之后弹出的提示。理由同 `withPreamble`：
+ * `recent_actions` 的每项只认 action / kind / text / page_changed 四个键。
+ *
+ * 措辞只说「之后可见」，不说「这一步引起了」：提示与动作只是时间上相邻，
+ * 暗示因果会让一条恰好这时弹出的无关通知被读成这一步的结果（见 withPreamble）。
+ */
+function actionWithNotices(entry: RecentActionIR): string {
+  const notices = entry.notices ?? [];
+  if (notices.length === 0) return entry.action;
+  return `${entry.action} (notices visible afterwards, not necessarily caused by this action: ${notices.join(" | ")})`;
 }
 
 /**
@@ -362,17 +453,39 @@ type AttemptOutcome =
  * `Retry-After` 目前不解析（P1）：厂商给的头需要与退避策略合并取大者，
  * 而现有契约只写了指数退避，先照契约做，不自行发挥。
  */
+/**
+ * `sendWithRetry` 的外壳：失败时把**已经发出的请求数**挂到错误上。
+ * 那些请求真实发出过、可能已计费，调用方据此记账（见 types.ts 的 failedCallUsage）。
+ */
 async function postJson(o: PostOptions): Promise<{ json: unknown; requests: number }> {
+  const started = performance.now();
+  const counter = { requests: 0 };
+  try {
+    return await sendWithRetry(o, counter);
+  } catch (error) {
+    if (counter.requests === 0) throw error;
+    throw attachFailedCallUsage(error, {
+      usage: { inputTokens: 0, outputTokens: 0, costUsd: null, requests: counter.requests },
+      latencyMs: performance.now() - started,
+    });
+  }
+}
+
+async function sendWithRetry(
+  o: PostOptions,
+  counter: { requests: number },
+): Promise<{ json: unknown; requests: number }> {
   if (o.apiKey.trim().length === 0) {
     throw new EngineRequestError(
       `${o.what}请求无法发出：未配置 API key，没有任何浏览器动作被执行。` +
-        `请设置 TYPESAFE_API_KEY（文本模型则是 JEVTEST_TEXT_MODEL_API_KEY），并用 \`jevtest doctor\` 复查。`,
+        `请设置 TYPESAFE_API_KEY（文本模型则是 TEXT_MODEL_API_KEY），并用 \`jevtest doctor\` 复查。`,
     );
   }
 
   let requests = 0;
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
     requests += 1; // **在 fetch 之前计数**：预算刹车必须数到那些没回来的请求。
+    counter.requests = requests;
 
     // 许可只覆盖「一次真实的 HTTP 往返」（含读体），不覆盖退避等待——
     // 否则重试等待会白占一个名额，把限流变成对并发度的无谓压制。
@@ -812,7 +925,7 @@ function buildTextUserMessage(req: TextRequest): string {
     lines.push("", "Recent actions (oldest first):");
     req.recentActions.forEach((entry, i) => {
       const changed = entry.pageChanged === null ? "unknown" : entry.pageChanged ? "yes" : "no";
-      lines.push(`${i + 1}. ${entry.kind} ${entry.action}${entry.text === null ? "" : ` → ${JSON.stringify(entry.text)}`} (page changed: ${changed})`);
+      lines.push(`${i + 1}. ${entry.kind} ${actionWithNotices(entry)}${entry.text === null ? "" : ` → ${JSON.stringify(entry.text)}`} (page changed: ${changed})`);
     });
   }
 

@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 /**
  * 命令行入口。
  *
@@ -35,7 +36,7 @@
  */
 
 import { access, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -47,10 +48,12 @@ import { loadSettings, missingCredentials } from "./config.ts";
 import type { Settings } from "./config.ts";
 import { createBrowserPool } from "./browser/pool.ts";
 import type { BrowserPool } from "./browser/pool.ts";
+import { createLoginManager } from "./browser/login.ts";
 import { createEngine, listEngines } from "./engine/registry.ts";
 import type { DecisionEngine } from "./engine/types.ts";
 import { CASE_ID_PATTERN, CaseNotFound, FROZEN_CASE_FILE, createCaseStore } from "./store/cases.ts";
 import type { CaseStore } from "./store/cases.ts";
+import { createAuthStateStore } from "./store/auth-states.ts";
 import { STATUS_LABELS, createRunnerService } from "./core/runner.ts";
 import type { RunnerService } from "./core/runner.ts";
 import { persistReport, readReport, toJUnit, toMarkdown } from "./core/report.ts";
@@ -199,36 +202,29 @@ export function createWiring(
    * `runId` / `suiteRunId`，而 `caseRevision` / `caseDigest` 只有同时看得见
    * 用例仓库与报告目录的这里才算得出来（`RunnerDeps.persist` 正是为此留的注入点）。
    */
-  const persist = async (report: CaseRunReport): Promise<void> => {
+  const persist = async (report: CaseRunReport, ran: Case): Promise<void> => {
     const reportDir = join(settings.runsDir, report.runId);
     await mkdir(reportDir, { recursive: true });
-    const snapshotPath = join(reportDir, "case.yaml");
+    const snapshotPath = join(reportDir, FROZEN_CASE_FILE);
 
     try {
-      // 仓库里的用例：冻结一份快照，顺带拿到 revision 与 digest。
-      // 第二参数是**文件路径**（不是目录），常量由 store 导出以免两处各写一遍 "case.yaml"。
-      const revision = await store.freeze(report.caseId, join(reportDir, FROZEN_CASE_FILE));
+      // 仓库里的用例：冻结**实际跑的那份**（入队时的 Case），revision 按 digest 反查。
+      // 冻结仓库的当前版本是错的：运行期间用例被改过的话，报告会指向一个没跑过的版本。
+      const revision = await store.freeze(report.caseId, snapshotPath, ran);
       report.caseRevision = revision.revision;
       report.caseDigest = revision.digest;
     } catch (error) {
+      // 仓库里读不到：文件形态的一次性运行，或用例在运行期间被删掉/改坏了。
+      // 手里都有实际跑的那份 Case，快照照写；revision 记 0（「未入库 / 对不上库里的版本」）。
+      // 这里不能往外抛：报告本身比快照重要，快照出问题也要让下面的报告落盘。
       const snapshot = fileSnapshots.get(report.caseId);
-      if (snapshot !== undefined) {
-        // 文件形态的一次性运行：不在仓库里，revision 记 0（「未入库」），
-        // 但 digest 照算——报告仍然能精确指回当时那份 YAML 的字节。
-        await writeFile(snapshotPath, snapshot.yaml, "utf8");
-        report.caseRevision = 0;
-        report.caseDigest = snapshot.digest;
-      } else {
-        // 用例在运行期间被删掉了。留一份**说明性**的快照而不是让报告目录残缺：
-        // 报告里指着 case.yaml，那个文件就该存在，哪怕内容是在解释它为什么没了。
-        await writeFile(
-          snapshotPath,
-          `# 用例快照不可用：${report.caseId} 在本次运行期间被删除或被移动。\n` +
-            `# 报告其余部分仍然有效。\n`,
-          "utf8",
-        );
+      await writeFile(snapshotPath, snapshot?.yaml ?? stringifyCase(ran), "utf8");
+      report.caseRevision = 0;
+      report.caseDigest = snapshot?.digest ?? caseDigest(ran);
+      if (snapshot === undefined) {
         console.warn(
-          `[jevtest] 警告：用例 ${report.caseId} 在运行期间不可读（${error instanceof Error ? error.message : String(error)}），报告未内嵌快照。`,
+          `[jevtest] 警告：用例 ${report.caseId} 在仓库里不可读（${error instanceof Error ? error.message : String(error)}），` +
+            `快照取自运行时的那份定义。`,
         );
       }
     }
@@ -248,7 +244,9 @@ export function createWiring(
     events: events.sink,
   });
 
-  const services: Services = { settings, store, runner, pool, events };
+  const authStates = createAuthStateStore({ root: settings.authDir });
+  const login = createLoginManager();
+  const services: Services = { settings, store, runner, pool, events, authStates, login };
   return { settings, store, pool, runner, services };
 }
 
@@ -299,13 +297,10 @@ function applyFlags(settings: Settings, flags: Record<string, string | boolean>)
  */
 async function commandServe(argv: ParsedArgs): Promise<number> {
   const settings = applyFlags(loadSettings(), argv.flags);
-  const pool = createBrowserPool({
-    maxContexts: settings.workers,
-    maxEngineInflight: settings.maxEngineInflight,
-    headless: settings.headless,
-  });
   // serve 不跑文件形态用例，快照表留空——仓库里的用例走 store.freeze。
-  const { runner, services } = createWiring(settings, new Map());
+  // 浏览器池只用 createWiring 里那一个：runner 与 /admit 借的都是它，
+  // 在这里另建一个的话，预热的是一个没人用的 Chromium。
+  const { runner, pool, services } = createWiring(settings, new Map());
 
   const security = {
     token: createToken(),
@@ -674,16 +669,17 @@ async function commandDoctor(argv: ParsedArgs): Promise<number> {
   const settings = applyFlags(loadSettings(), argv.flags);
   const checks: DoctorCheck[] = [];
 
-  // 1. Node 版本。engines 要求 >= 22.6（需要 --experimental-strip-types）。
+  // 1. Node 版本。engines 要求 >= 22.7：--experimental-strip-types 在 22.6 才有，
+  //    但 22.6 的实现剥不了类私有字段上的类型标注（`#limit: number`），本项目用到了。
   const [major = 0, minor = 0] = process.versions.node.split(".").map(Number);
   checks.push(
-    major > 22 || (major === 22 && minor >= 6)
+    major > 22 || (major === 22 && minor >= 7)
       ? { name: "Node 版本", status: "ok", detail: `v${process.versions.node}` }
       : {
           name: "Node 版本",
           status: "failure",
-          detail: `v${process.versions.node} 低于要求（>= 22.6）`,
-          fix: "升级 Node 到 22.6 以上；开发期依赖 --experimental-strip-types",
+          detail: `v${process.versions.node} 低于要求（>= 22.7）`,
+          fix: "升级 Node 到 22.7 以上；开发期依赖 --experimental-strip-types",
         },
   );
 
@@ -893,8 +889,18 @@ function createCaseStoreServices(settings: Settings, store: CaseStore): Services
     events: {
       sink: { emit: () => {} },
       log: notStarted("事件日志"),
+      peek: () => null,
       bus: { emit: () => {}, subscribe: notStarted("事件日志") },
       retire: () => {},
+    },
+    // 登录态仓库是纯文件读写，没有副作用，给真的；登录窗口会弹浏览器，给桩
+    authStates: createAuthStateStore({ root: settings.authDir }),
+    login: {
+      open: notStarted("登录窗口"),
+      status: () => null,
+      capture: notStarted("登录窗口"),
+      cancel: async () => {},
+      stop: async () => {},
     },
   };
 }
@@ -946,6 +952,19 @@ async function main(argv: string[]): Promise<number> {
 }
 
 /**
+ * 经 npm 的 bin 软链启动时，argv[1] 是软链路径（如 node_modules/.bin/jevtest），
+ * 而 import.meta.url 是解析后的真实路径——不先 realpath 的话两者永远不相等，
+ * 进程什么都不做就以退出码 0 结束。
+ */
+function realpathOr(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return path;
+  }
+}
+
+/**
  * 只在**被直接执行**时进入 main。
  *
  * 本文件同时是「装配入口」：e2e 测试要复用 `createWiring`，跑同一套接线。
@@ -957,7 +976,7 @@ async function main(argv: string[]): Promise<number> {
  */
 const invokedDirectly =
   process.argv[1] !== undefined &&
-  import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
+  import.meta.url === pathToFileURL(realpathOr(resolve(process.argv[1]))).href;
 
 if (invokedDirectly) {
   process.exitCode = await main(process.argv.slice(2));

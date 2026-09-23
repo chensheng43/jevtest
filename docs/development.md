@@ -8,8 +8,8 @@
 
 | 要求 | 版本 | 说明 |
 | --- | --- | --- |
-| Node | **≥ 22.6** | 需要 `--experimental-strip-types`。开发机实测 22.21.0 |
-| npm | 任意较新版本 | 实测 10.9.4。pnpm 未安装，不必引入 |
+| Node | **≥ 22.7** | 需要 `--experimental-strip-types`（22.6 才有，但 22.6 剥不了类私有字段上的类型标注），更低的版本连 `npm test` 都跑不起来 |
+| npm | 任意较新版本 | 不需要 pnpm |
 
 ```bash
 npm install
@@ -19,12 +19,12 @@ cp .env.example .env                 # 填 TYPESAFE_API_KEY
 
 运行时依赖刻意保持在少数几个：
 
-| 包 | `package.json` 声明 | 脚手架验证时解析到 | 用途 |
-| --- | --- | --- | --- |
-| `playwright` | `^1.49.0` | 1.63.0 | 浏览器层 |
-| `zod` | `^4.0.0` | 4.6.5 | schema 校验，前后端共享 |
-| `yaml` | `^2.6.0` | 2.9.1 | 用例文件 |
-| `bootstrap` | `^5.3.8` | 5.3.8 | **只在浏览器里跑**，走 `/vendor/` 直接引 |
+| 包 | 用途 |
+| --- | --- |
+| `playwright` | 浏览器层 |
+| `zod` | schema 校验与类型推导（只在 Node 侧） |
+| `yaml` | 用例文件 |
+| `bootstrap` | **只在浏览器里跑**，走 `/vendor/` 直接引 |
 
 `bootstrap` 是唯一一个不进 Node 进程的依赖：`index.html` 用
 `/vendor/bootstrap/dist/css/bootstrap.min.css` 直接从 `node_modules` 引它，
@@ -51,17 +51,14 @@ cp .env.example .env                 # 填 TYPESAFE_API_KEY
 | `JEVTEST_ENGINE_INFLIGHT` | `4` | 在途引擎请求上限。**与 `WORKERS` 刻意解耦** |
 | `JEVTEST_HEADLESS` | `true` | 要肉眼看 agent 操作时设 `false` |
 | `JEVTEST_TRACING` | `true` | 关掉可省磁盘，但失败时就没 trace 可看了 |
+| `JEVTEST_RECORD_FRAMES` | `true` | 每次观测截一帧，结果页的轨迹靠它看画面 |
 | `JEVTEST_CASES_DIR` / `JEVTEST_RUNS_DIR` | `./cases` / `./runs` | 用例库与运行产物 |
+| `JEVTEST_AUTH_DIR` | `./auth` | 登录态文件（会话 cookie，0600，不入库） |
 | `JEVTEST_DEFAULT_ENGINE` | `typesafe` | 用例未声明 `engine` 时用它。`scripted` 不在注册表里（测试专用，见下） |
 
 `JEVTEST_WORKERS` 与 `JEVTEST_ENGINE_INFLIGHT` 为什么是两个而不是一个：
 前者的瓶颈是浏览器内存（每 context 约 80~150MB），后者是厂商侧限流。
 两者无关，绑成一个总闸会让其中一个白白闲置（见 `browser/pool.ts`）。
-
-> ⚠️ **`zod` 的 minor 版本是承重的。** 用例预算是否生效取决于 `.prefault()` 的行为
-> （见 §5.1），而声明写的是 `^4.0.0` 而非固定版本——全新安装可能解析到更高的 minor。
-> 升级 zod 之后**必须重跑那条 `budget.maxModelCalls === 40` 的断言**，
-> 否则预算静默失效、成本无上限。
 
 ---
 
@@ -145,10 +142,7 @@ const engine = createScriptedEngine({
 });
 ```
 
-这把参考项目 `tests/test_agent.py:77-95` 里
-`monkeypatch.setattr(model, "post_json", fake)` 的手法提升到了注册表层。
-差别很大：monkeypatch 只能测孤立单元，而这里
-**server + queue + pool + runner + checks 的全链路**都能被确定性地测试。
+为什么它比 monkeypatch 强，见 [architecture.md §3.4](architecture.md)。
 
 `src/browser/session.ts` 的 `Session` 接口是同一思路的另一半：
 `core/` 只依赖接口，不 import playwright，因此单元测试用 `FakeSession`
@@ -178,8 +172,8 @@ z.object({ budget: BudgetSchema.prefault({}) })
 **后果**：`budget.maxModelCalls` 变成 `undefined`，用例预算静默失效、
 **成本无上限**。这是会烧钱的那种 bug，而且不会报错。
 
-脚手架验证时解析到的是 zod 4.6.5，`.prefault()` 可用。注意 `package.json` 写的是
-`^4.0.0` 而非固定版本，因此升级 zod 后必须重跑这条断言。必须配套测试：
+`package.json` 写的是 `^4.0.0` 而非固定版本，全新安装可能解析到更高的 minor，
+因此**升级 zod 后必须重跑这条断言**（在 `tests/schema.test.ts` 里）：
 
 ```ts
 assert.equal(CaseDefinitionSchema.parse({ 最小输入 }).budget.maxModelCalls, 40);
@@ -191,7 +185,7 @@ assert.equal(CaseDefinitionSchema.parse({ 最小输入 }).budget.maxModelCalls, 
 它们由 `scripts/copy-assets.mjs` 负责，`npm run build` 里已串好。
 
 漏了的话本地开发察觉不到（类型剥离直接跑源码），**部署时才炸**。
-所以 `doctor` 里要加一条 dist 资产完整性检查。
+`doctor` 里的「dist 资产」检查就是为此设的。
 
 `snapshot.js` 之所以保持 `.js`：它以**文本**读出后注入 `page.evaluate`，
 从不作为模块 import。保持 `.js` 可以继续被 `node --check` 与 IDE 语法校验。
@@ -246,11 +240,14 @@ const next = await session.observe();     // 后
 | 移植来的代码标注来源 | 文件头写明来源与 MIT 署名，详见 [`NOTICE`](../NOTICE) |
 | 不引入前端构建工具链 | 原生 HTML/CSS/JS。`tsc` 是编译器，不算打包器。前端库走 `/vendor/` 从 `node_modules` 直引，仍然不打包 |
 | 后端依赖控制在 3 个 | 加依赖前先问"手写要多少行"。浏览器侧依赖（`bootstrap`）不算在内，它不进 Node 进程 |
-| 前端只做展示，不做判断 | 三态怎么显示由 `style.css` 决定，但**哪一态**由 `app.js` 的 `passedBadge` / `verdictBadge` 唯一决定。D9/D8 的视觉区分由 `tests/frontend.test.ts` 守着 |
+| 前端的目录 | `app.js` 入口（路由）；`lib/` 不碰或只做底层 DOM（`api` / `core` 纯函数 / `format` / `runs` / `router` / `dom`）；`ui/` 反馈与通用组件；`components/` 登录态流程与轨迹查看器；`views/` 每个路由一张视图（D22） |
+| 前端只做展示，不做判断 | 三态怎么显示由 `style.css` 决定，但**哪一态**由 `ui/widgets.js` 的 `passedBadge` / `verdictBadge` / `checkBadge` 与 `lib/runs.js` 的 `verdictClass` 唯一决定。D9/D8 的视觉区分由 `tests/frontend.test.ts` 守着 |
+| 失败只走四条路 | 字段错误（编辑器）/ 页面错误槽 `errorSlot()` / `toast()` / 全局横幅，都在 `ui/feedback.js`。异步按钮一律 `busy(button, fn)`；确认一律 `confirmDialog()`，不用原生 `alert` / `confirm`（测试静态检查） |
 | 编辑器的草稿是唯一事实来源 | 控件在 `input` 时写回 `draft`，`formToDefinition(draft)` 是纯函数、不读 DOM。两处读值必然分叉，表现是「填了但保存后没有」（D19） |
 | 子节点列表用 `setChildren(node, [...])` | 直接 `replaceChildren` 传数组会被转成字符串（页面上出现 `[object HTMLDivElement]`），传 `null` 会渲染出字面的 "null"，两种都不报错。单个节点直接 `replaceChildren` 没问题 |
-| 标签页与折叠不引 Bootstrap 的 JS | 手写 `tabs()` / 原生 `<details>`。用 `bootstrap.js` 的前提是先按 D18 重估 `/vendor` 的信任边界 |
-| 前端的纯逻辑放在 `#region 纯函数` 之间 | 那两段不碰 DOM，`tests/frontend.test.ts` 会把它们抠出来跑往返测试——这是不引 jsdom 也能测到前端逻辑的唯一口子（D19） |
+| 标签页、折叠、菜单、对话框不引 Bootstrap 的 JS | 手写 `tabs()` / 原生 `<details>` / 原生 `<dialog>`。用 `bootstrap.js` 的前提是先按 D18 重估 `/vendor` 的信任边界 |
+| 前端的纯逻辑放在 `lib/core.js` | 它不碰 DOM，`tests/frontend.test.ts` 直接 import 它跑往返测试——这是不引 jsdom 也能测到前端逻辑的唯一口子（D19） |
+| 带记号的文案走 `rich()` / `hint()` | `**强调**` 与反引号只有经过它们才会渲染；直接塞进 `text:` 会在页面上显示字面的星号 |
 | 错误信息给人看 | 说清原因和怎么修，不要只抛 `Error: failed` |
 | 字符串联合类型代替 `enum` | `erasableSyntaxOnly` 要求 |
 
@@ -264,29 +261,7 @@ const next = await session.observe();     // 后
 
 ---
 
-## 7. 实现顺序建议
-
-**纵向切片，不是横向分层。**
-
-```text
-schema/case.ts
-  → browser/snapshot.js + session.ts + playwright-session.ts
-      里程碑：打开 Wikipedia 主页并打印元素表
-  → engine/types.ts + typesafe.ts + core/policy.ts
-      里程碑：跑一次决策，打印 operation 与概率分布
-  → core/agent.ts + checks.ts + report.ts
-      里程碑：完整跑完一个用例，CLI 输出报告 JSON
-  → 最后才是 web/
-```
-
-**先 CLI 后 Web。** CLI 跑通了，Web 层就只是薄薄的 I/O 与渲染；
-而且离线 e2e 测试可以在 Web 层存在之前就锁死 runner 的正确性。
-
-每个里程碑都应该是**可运行的**，而不是"写完了但还不能跑"。
-
----
-
-## 8. 修改 checklist
+## 7. 修改 checklist
 
 改完代码后：
 
@@ -310,16 +285,10 @@ npm run build && ls dist/browser/         # 动了资产就确认复制到位
 
 ---
 
-## 9. 尚待验证
+## 8. 尚待验证
 
-**权威列表在 [architecture.md §11](architecture.md)**——那里分三部分记录了
-接口层矛盾（§11.1，**已定案**）、通路与模块（§11.2，**已补齐**）
-与待验证事项（§11.3，**需要真跑才能回答**）。§11.1 与 §11.2 读它们是**替代重新推导**，
-动手时照此执行，不要自行发挥。
-
-本节只保留与开发流程直接相关的两条，其余不重复，避免两处漂移。
+权威列表在 [architecture.md §11.3](architecture.md)。这里只列与开发流程直接相关的：
 
 | 事项 | 状态 |
 | --- | --- |
 | 无头模式下的完整任务跑通 | 未验证。这是 CI 的前提，应先于 CI 搭建验证 |
-| `doctor` 的 dist 资产完整性检查 | 尚未实现（见 §5.2）。漏了本地察觉不到，**部署时才炸** |

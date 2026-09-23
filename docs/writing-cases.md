@@ -250,7 +250,7 @@ assertions:
 | `status: done` 但 `passed: false` | **最常见**。看 `final` 族哪条没过，对比报告里的实际值。通常是断言写太严或 goal 没说清 |
 | `status: blocked` | 看轨迹最后几步。通常是目标控件不在候选集里——可能踩中了[已知边界](limitations.md) |
 | `status: budget_exceeded` | 看 `quality` 与步数。卡死的话调大预算没用，要改 goal |
-| `status: guardrail_blocked` | 看 `guardrailHits`。命中内置护栏说明 goal 太宽；命中自定义护栏说明护栏太严 |
+| `status: guardrail_blocked` | 看 `guardrailHits`。命中内置护栏说明 goal 太宽；命中自定义护栏说明护栏太严。**第 0 步就跳出白名单**多半是要登录：配 `authState`（已配的话重新登录），不要放宽白名单 |
 | `status: error` | 基建问题，不是用例问题。看错误消息与 trace.zip |
 | 通过但耗时异常长 | 用 `quality.maxElapsedMs` 卡住它。可能是模型在某一步反复犹豫 |
 
@@ -281,7 +281,7 @@ assertions:
 写用例时请注意这些**还没有**的能力，它们会影响用例设计：
 
 - **测试数据准备与清理**（fixture / teardown）——没有。用例需要的数据得预先存在
-- **登录态管理**——底层 `storageState` 能力已有，但还没有配套的界面与用例字段
+- **登录态自动续期**——登录态过期后要到「登录态」页重新登录一次（登录本身已支持，见 [`case-format.md`](case-format.md) 的 `authState`）
 - **跨用例的数据传递**
 - **参数化用例**（同一用例多组数据）
 - **后端副作用校验**——只能断言页面，不能查数据库或调后端 API 确认操作真的生效

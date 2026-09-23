@@ -10,21 +10,18 @@ npm test
 ## 硬性要求
 
 **任何测试都不得调用付费 API。** 这靠 `scripted` 引擎实现
-（见 `src/engine/scripted.ts`），它把参考项目
-`tests/test_agent.py:77-95` 里 `monkeypatch.setattr(model, "post_json", fake)`
-的手法提升到注册表层——于是 server、queue、pool、runner、checks 的**全链路**
-都能在零成本、完全确定的条件下被测试，而不只是孤立的单元。
+（`src/engine/scripted.ts`，设计见 [architecture.md §3.4](../docs/architecture.md)）。
 
 同理，除 `tests/e2e/` 外不应启动浏览器；`tests/e2e/` 里的用例用本地 fixture 站点
 （见 `fixtures/site/`），不访问外网。外网的 Wikipedia 用例只有显式设置
 `JEVTEST_E2E=1` 时才跑。
 
-## 已收录（486 项）
+## 覆盖内容
 
 | 文件 | 覆盖内容 |
 | --- | --- |
 | `schema.test.ts` | **默认值必须真的被解析**——断言 `CaseDefinitionSchema.parse({最小输入}).budget.maxModelCalls === 40`。这条专门守着 zod v4 的 `.default({})` 陷阱，见下方 |
-| `yaml-roundtrip.test.ts` | YAML → 对象 → 序列化 → 解析 → 深比较；digest 稳定。（真正的「表单 ↔ YAML」往返要等 Web 表单层，目前锁的是「YAML ↔ 对象」这一段） |
+| `yaml-roundtrip.test.ts` | YAML → 对象 → 序列化 → 解析 → 深比较；digest 稳定。「对象 ↔ 表单草稿」那一段在 `frontend.test.ts` |
 | `migrations.test.ts` | 逐级升级、版本过高报错、迁移链断裂报错 |
 | `config.test.ts` | 环境变量默认值、越界拒绝、布尔写法、错误信息含修复方式 |
 | `policy.test.ts` | `buildActionSpace` 的 readonly 模式**不含** `TYPE_TEXT` / `SELECT` 键；一个节点只拿一个索引；select 的每个 option 是独立 target；**断言不进 prompt**；只读角色清单与文档一致 |
@@ -40,13 +37,12 @@ npm test
 | `security.test.ts` | 三道闸的反向用例、`/vendor` 的穿越防护（含 NUL 与各类编码） |
 | `events.test.ts` / `api.test.ts` | 事件的 seq 语义与回放；HTTP 集成（含 413 流式限长、409 带 currentRevision、路径穿越、令牌不泄漏） |
 | `admission.test.ts` | 准入规则逐条命中/不命中 |
-| `frontend.test.ts` | 前端静态资产的**契约**（无 DOM 环境，见下）：`app.js` 查的 id 在 `index.html` 里都存在、令牌头名与 `security.ts` 一致、`/vendor/` 引用都在白名单内、**D9/D8 的三态与未判定取自互不相同的色系**；外加**编辑器纯函数区的往返**——把 `app.js` 里标了 `#region 纯函数` 的两段抠出来求值，断言「种子用例载入再保存语义不变」「每个配方与每处原始字段都落得下去」「空 `statusIn` 原样活着」 |
+| `frontend.test.ts` | 前端静态资产的**契约**（无 DOM 环境，见下）：扫描 `public/` 下全部模块——查的 id 在 `index.html` 里都存在、每个模块都被 import、令牌头名与 `security.ts` 一致、`/vendor/` 引用都在白名单内、**D9/D8 的三态与未判定取自互不相同的色系**、不用原生 `alert`/`confirm`；外加直接 import `lib/core.js` 跑**编辑器往返**（种子用例载入再保存语义不变、每个配方与原始字段都落得下去、空 `statusIn` 原样活着）与**字段名/检查项/校验文案的人话翻译** |
 | `e2e/fixture.e2e.test.ts` | **真浏览器**：观测/几何/遮挡命中测试、全链路（输入→提交→动态结果→断言→报告自包含）、护栏拦截、readonly 的候选集、`contextsActive` 归零 |
 
 `frontend.test.ts` 不断言 DOM 结构、也不截图——项目没有 jsdom，也不打算引入。
 它只守「改了之后**页面照常打开、但行为静默错掉**」那一类约定，因为那类问题
-`npm test` 本来抓不到。它唯一执行前端代码的地方是那两段纯函数区（`new Function`，
-不碰 DOM），往返测试就在那里跑。
+`npm test` 本来抓不到。它唯一执行前端代码的地方是 `lib/core.js`（不碰 DOM，直接 import）。
 
 **界面本身点起来对不对**是另一回事，那由 `scripts/ui-walkthrough.mjs` 负责：
 
@@ -54,10 +50,11 @@ npm test
 npm run walkthrough     # 自己起服务、自己收摊，用临时用例库，不碰 cases/ 与 runs/
 ```
 
-它用真 Chromium 走一遍导入、编辑、断言增删、保存后重载、校验标红、结果页分档、
-深色模式与行内删除，并收集控制台/网络报错，截图落在临时目录。这不是 `npm test`
-的一部分（要真浏览器、要几十秒），而是 README 待办里那条「人工点一遍 `jevtest serve`」
-的脚本化版本——它已经抓到过三个真缺陷（见 `docs/decisions.md` D19 末尾）。
+它用真 Chromium 走一遍：导入（含空内容报错）、编辑与标脏（含原始行）、双击保存不出假冲突、
+快捷键保存、重载后断言还在、离开确认框、新建与校验（字段标红 + 人话汇总 + 点击跳转）、
+保存内容抽屉、运行列表与结果页（判决带、轨迹时间线、截图加载、断言明细）、深色模式、
+菜单 + 确认框删除；并收集控制台/网络报错与任何原生对话框，截图落在临时目录。这不是 `npm test`
+的一部分（要真浏览器、要几十秒）。改了界面之后跑一遍。
 
 需要真 Chromium。没装时整组**显式跳过**（`npx playwright install chromium`），
 而不是让 `npm test` 变红——环境缺浏览器与代码坏掉是两回事。
@@ -66,17 +63,8 @@ npm run walkthrough     # 自己起服务、自己收摊，用临时用例库，
 
 ### 1. zod v4 的 `.default({})` 不解析默认值
 
-```ts
-// 错误写法：budget 会是 {}，嵌套默认值全部丢失
-z.object({ budget: BudgetSchema.default({}) })
-
-// 正确写法：.prefault 是 input-side 默认，会走 schema 解析
-z.object({ budget: BudgetSchema.prefault({}) })
-```
-
-直接后果是 `budget.maxModelCalls` 变成 `undefined`，**用例预算静默失效、成本无上限**。
-这是会真金白银踩坑的地方，`schema.test.ts` 里的那条断言必须存在。
-（已确认锁定的 zod 版本是 4.6.5，`.prefault()` 可用。）
+用错会让**用例预算静默失效、成本无上限**。`schema.test.ts` 里那条
+`budget.maxModelCalls === 40` 的断言必须存在。详见 [development.md §5.1](../docs/development.md)。
 
 ### 2. `skipped` 不是 `passed`
 

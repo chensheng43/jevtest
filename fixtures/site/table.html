@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>采集成功列表</title>
+  <style>
+    body { margin: 0; padding: 16px; font: 14px/1.5 sans-serif; }
+    td, th { padding: 2px 8px; text-align: left; }
+    .box { display: inline-block; width: 12px; height: 12px; border: 1px solid #666; }
+    [role="row"] { display: flex; gap: 8px; }
+  </style>
+</head>
+<body>
+  <!-- 来自一次真跑：表头全选框与每行的复选框都没有可访问名，上游都记成 `checkbox` -->
+  <table>
+    <thead>
+      <tr><th><input type="checkbox" /></th><th>标题</th><th>物品单价</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><input type="checkbox" /></td><td>Remote Control Car Toy</td><td>SG$8.82</td></tr>
+      <tr><td><input type="checkbox" /></td><td>LELEMAO Large Rechargeable RC Off-road Car</td><td>SG$26.10</td></tr>
+      <tr><td><input type="checkbox" /></td><td>Hot Wheels Basic Single Car</td><td>SG$3.50</td></tr>
+    </tbody>
+  </table>
+
+  <!-- ARIA 网格：表头行用 columnheader，数据行用 gridcell -->
+  <div role="grid">
+    <div role="row"><span role="columnheader"><span class="box" role="checkbox" aria-checked="false" tabindex="0"></span></span><span role="columnheader">账号</span></div>
+    <div role="row"><span role="gridcell"><span class="box" role="checkbox" aria-checked="false" tabindex="0"></span></span><span role="gridcell">主账号</span></div>
+    <div role="row"><span role="gridcell"><span class="box" role="checkbox" aria-checked="false" tabindex="0"></span></span><span role="gridcell">子账号</span></div>
+  </div>
+
+  <!-- 已有名字的不动；不在表格行里的无名复选框仍回退到角色名 -->
+  <label><input type="checkbox" /> 保存图片</label>
+  <input type="checkbox" />
+</body>
+</html>

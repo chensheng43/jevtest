@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>只露出一截的按钮</title>
+  <style>
+    body { margin: 0; height: 2400px; }
+    /* 来自一次真跑：类目弹层的「确定」在弹层最下沿，只露出几像素，中心点落在视口外。
+       露出的那一截不到按钮高度的一半，按中心点判定就整个看不见。 */
+    #confirm { position: absolute; top: calc(100vh - 10px); left: 40px; height: 32px; width: 80px; }
+    /* 完全在视口外：仍然不该进候选集 */
+    #cancel { position: absolute; top: calc(100vh + 20px); left: 140px; height: 32px; width: 80px; }
+  </style>
+</head>
+<body>
+  <p id="result"></p>
+  <button type="button" id="confirm">确定</button>
+  <button type="button" id="cancel">取消</button>
+  <script>
+    document.getElementById("confirm").addEventListener("click", () => {
+      document.getElementById("result").textContent = "已确认";
+    });
+  </script>
+</body>
+</html>

@@ -6,6 +6,9 @@ dist/
 .env
 .env.local
 
+# 登录态：storageState 里是真实会话 cookie，绝不入库
+auth/
+
 # 运行产物（报告、截图、trace）
 runs/
 *.log
@@ -18,3 +21,7 @@ trace.zip
 Thumbs.db
 .idea/
 .vscode/
+
+# 用例库：界面里建的用例是本地数据（常指向内部站点、带登录态名字），不入库。
+# 仓库只收录 cases/ 下平铺的参考用例（如 wikipedia-godel.yaml）
+cases/*/

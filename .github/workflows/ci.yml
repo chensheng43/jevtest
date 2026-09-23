@@ -1,0 +1,43 @@
+# 每次推送与 PR：类型检查 + 全量测试（含真 Chromium 的 e2e）+ 构建产物冒烟。
+#
+# 为什么要跑最低版本：package.json 声明 >=22.7。只在最新版上跑的话，「最低版本其实
+# 跑不起来」这种事没人会发现——22.6 就是这么被发现跑不起来的（剥不了私有字段的类型标注）。
+# 为什么要冒烟 dist：开发期直接跑 .ts，构建产物（shebang、copy-assets 复制的非 TS 资产）
+# 平时没人碰，坏了只会在全局安装之后才暴露。
+
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ["22.7.0", "22", "24"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - run: npm ci
+
+      # e2e 需要真 Chromium；没装时那组测试会显式跳过，CI 上不允许这样蒙混过去
+      - run: npx playwright install --with-deps chromium
+
+      - run: npm run typecheck
+      - run: node --check src/browser/snapshot.js
+      - run: npm test
+
+      - name: 构建产物冒烟
+        run: |
+          npm run build
+          node dist/cli.js --help
+          test -f dist/browser/snapshot.js
+          test -f dist/web/public/index.html

@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>页面提示</title>
+  <style>
+    body { margin: 0; padding: 60px 16px 16px; font: 14px/1.5 sans-serif; }
+    /* 来自一次真跑：自造的 toast，没有 role，靠 id/class 与 fixed 定位认出来 */
+    .msgno { position: fixed; top: 8px; left: 480px; padding: 4px 12px; background: #fde2e2; }
+    /* 整宽的常驻公告：像提示，但每步都报只是噪音 */
+    .notice-bar { position: fixed; top: 0; left: 0; right: 0; height: 24px; background: #fdf6ec; }
+    /* 读屏专用的 live 区域：1px 大小，屏幕上看不见 */
+    .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+    .hidden-toast { position: fixed; top: 40px; right: 16px; display: none; }
+    .toast-group { position: fixed; bottom: 16px; right: 16px; }
+  </style>
+</head>
+<body>
+  <div class="notice-bar">你当前使用的插件版本过低，请下载最新版本</div>
+  <div id="msg-mini" class="msgno"><div class="cnt">请输入SKU</div></div>
+  <div class="hidden-toast toast">这条 toast 已经关了</div>
+  <div class="sr-only" aria-live="polite">读屏用的播报</div>
+  <!-- 静态的列表区，class 里带 message 但不是浮层 -->
+  <ul class="message-list"><li>站内信：欢迎使用</li></ul>
+  <form>
+    <label>库存SKU <input type="text" placeholder="请输入SKU" /></label>
+    <div role="alert">SKU 不能为空</div>
+    <button type="button">确定</button>
+  </form>
+  <!-- 嵌套的提示只收最外层一次 -->
+  <div class="toast-group"><div class="toast">导入失败</div></div>
+</body>
+</html>

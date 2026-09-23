@@ -11,9 +11,7 @@
 配合 `scripted` 引擎，整条链路（server → queue → pool → runner → checks）
 都能在真浏览器里被确定性地验证。
 
-## 计划收录
-
-单页应用，三块内容，覆盖参考项目已知的边界：
+## 覆盖什么
 
 | 区域 | 元素 | 用来验证 |
 | --- | --- | --- |
@@ -21,15 +19,13 @@
 | 结果卡片 | 动态渲染的卡片 + 「查看详情」按钮 | 动态内容出现后的观测、按语义标签定位 |
 | 详情页 | 返回按钮 + 面包屑 | 导航后的新鲜度判定（旧文档必须失效） |
 | 危险按钮 | 「删除此项目」 | 护栏拦截：断言 `session.act` **调用次数为 0** |
-| 陷阱元素 | 移出视口 / 被浮层遮挡 / 中途被禁用的按钮 | 执行前的几何重解析与遮挡命中测试 |
+| 陷阱元素 | 移出视口 / 一直被浮层盖住 / 观测后被浮层盖住 / 中途被禁用的按钮 | 观测时的遮挡过滤；执行前的几何重解析与遮挡命中测试 |
 
 最后两类是这个站点最重要的价值——**它们把参考项目里靠人工核对的安全性质
 变成了可自动化的断言**。参考项目用 `scripts/check_guards.py` 的
 `data:text/html` 内联页面做类似的事，这里改成独立文件以便复用与维护。
 
-## 现状
-
-上表已全部落地：
+## 文件
 
 | 文件 | 内容 |
 | --- | --- |
@@ -38,6 +34,14 @@
 | `style.css` | 含两条功能性样式：浮层必须盖住按钮中心点、离屏按钮必须在首屏之外 |
 | `app.js` | 动态渲染（rAF）、自动补全候选（setTimeout）、陷阱定时器、`window.__fixture` 状态 |
 | `detail.js` | 详情页填充与返回 |
+| `frames.html` | 一个同源 + 一个跨域 iframe（跨域靠换成 `localhost` 访问同一服务），给准入探测的 frame 计数、同源 iframe 元素并表、`unreadableFrames` 用 |
+| `pointer.html` | jQuery 式下拉菜单：`<li>` 无 role、靠 `cursor: pointer` + 事件委托可点，另有禁用项（`no-drop`）和与语义候选重叠的 pointer 元素 |
+| `notices.html` | 页面提示：自造的 fixed toast（`#msg-mini.msgno`，无 role）、`role=alert` 的表单校验、嵌套的 toast 组；以及不该收的：整宽常驻公告、1px 读屏 live 区域、`display:none` 的 toast、非浮层的 `message-list` |
+| `clipped.html` | 只露出上沿 10px 的按钮（中心点在视口外）与完全在视口外的按钮，给「点击点取元素与视口交集的中心」用 |
+| `late.html` + `late.json` | 按钮在 DOMContentLoaded 之后由一次慢接口（`?delay=800`）拉回来，给「打开起始页先等网络安静」用 |
+| `dialog.html` + `dialog.json` | 点按钮后弹窗外壳立刻出现、SKU 选项等慢接口回来才渲染，给「动作之后等页面安静」用；另有一个 5s 才回的「刷新统计」，验证等待按上限放行 |
+| `iframe-modal.html` + `iframe-form.html` + `iframe-ready.js` | 点「+ 添加产品」后弹出遮罩与弹窗，弹窗里的 iframe 文档是个慢请求（`?delay=600`）；iframe 里有输入框、原生下拉、首屏之下的「保存模板」，以及一个被父文档浮层盖住的按钮。给同源 iframe 的观测、执行、滚动与逐层命中测试用。`iframe-modal.html?src=` 覆写 iframe 地址；`iframe-form.html?ready=<ms>` 让整页先隐藏、等慢脚本到了才显示（加载中的白屏） |
+| `table.html` | 无名复选框：`<thead>` 全选框 + 三行数据、ARIA 网格（`columnheader` / `gridcell`），以及有 label 的、不在行里的对照组 |
 
 配套的静态服务在 `tests/e2e/fixture-server.ts`，导出
 `startFixtureServer(): Promise<{ url: string; close(): Promise<void> }>`，
@@ -55,6 +59,9 @@
    于是「卡片渲染了却不在元素表里」。
    唯一的例外是自动补全候选——它要的正是「慢一点出现」，
    因为 combobox 模式的 settle 会一直等到候选出现（上限 200ms）。
+   这条只管 goto 之后与「动作之前」的观测：`act()` 之后还会再等页面安静
+   （动作引出的请求返回 + DOM 静止 300ms，见 `POST_ACTION_QUIET`），
+   所以要验证「动作之后晚到的内容」时用慢接口（`?delay=`），不要靠 setTimeout 的时长去卡窗口。
 3. **不访问外网、不调用任何 API。** 这是它存在的前提。
 
 ### 可用的调试开关
@@ -62,7 +69,7 @@
 - `index.html?trapDelay=<ms>` —— 覆写陷阱元素的生效延迟（默认 1500ms）。
   调大可以放宽「观测时有效、执行前失效」这个时间窗，便于在慢机器上排查。
 - `window.__fixture` —— 页面上的状态：`deleted` / `searched` / `navigated` /
-  `trapClicked` / `trapMoved` / `trapDisabled` / `trapDelayMs`。
+  `trapClicked` / `trapMoved` / `trapDisabled` / `trapOccluded` / `trapDelayMs`。
   **它是安全断言的物证**：护栏拦下动作时，`trapClicked` 与 `deleted`
   必须仍是初始值——只看 `status` 是不够的。
 

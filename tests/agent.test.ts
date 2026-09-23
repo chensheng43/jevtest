@@ -18,12 +18,20 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { CaseAgent, DEFAULT_NO_PROGRESS_LIMIT } from "../src/core/agent.ts";
+import {
+  BLANK_FRAME_POLL_MS,
+  BLANK_FRAME_WAIT_MS,
+  CaseAgent,
+  DEFAULT_NO_PROGRESS_LIMIT,
+  MAX_CONSECUTIVE_DISCARDS,
+} from "../src/core/agent.ts";
+import { MAX_WEAK_TERMINAL_OVERRIDES } from "../src/core/policy.ts";
 import { createBudgetMeter } from "../src/core/budget.ts";
-import { StalePage } from "../src/core/errors.ts";
+import { InputInterrupted, OccludedTarget, StalePage } from "../src/core/errors.ts";
 import { createScriptedEngine, constantSteps } from "../src/engine/scripted.ts";
 import type { ScriptedStep } from "../src/engine/scripted.ts";
-import type { DecisionEngine } from "../src/engine/types.ts";
+import type { Answer, DecisionEngine, DecisionRequest } from "../src/engine/types.ts";
+import { attachFailedCallUsage } from "../src/engine/types.ts";
 import { CaseDefinitionSchema } from "../src/schema/case.ts";
 import type { Case, CaseDefinition } from "../src/schema/case.ts";
 import type { RunEvent } from "../src/schema/events.ts";
@@ -60,6 +68,8 @@ async function runCase(input: {
   session: FakeSession;
   engine: DecisionEngine;
   signal?: AbortSignal;
+  captureFrame?: () => Promise<number>;
+  sleep?: (ms: number) => Promise<void>;
 }): Promise<RunResult> {
   const events: RunEvent[] = [];
   const budget = createBudgetMeter(input.caseDef.budget);
@@ -73,6 +83,8 @@ async function runCase(input: {
       },
     },
     caseDef: input.caseDef,
+    ...(input.captureFrame === undefined ? {} : { captureFrame: input.captureFrame }),
+    ...(input.sleep === undefined ? {} : { sleep: input.sleep }),
   });
 
   const report = await agent.run(input.signal ?? new AbortController().signal);
@@ -130,6 +142,19 @@ const ACCEPTED: ScriptedStep = {
 /** 一个可点、可填、可滚、可等的页面。 */
 function richPage(overrides: Partial<Observation> = {}): Observation {
   return makeObservation({ actions: interactiveActions(), ...overrides });
+}
+
+/**
+ * 三个链接的页面。点了没反应的节点会被移出 CLICK 候选（见 agent.ts 的 `ineffectiveClicks`），
+ * 于是「一直选 `"1"`」在页面不变时会依次点到三个不同的链接——无进展闸要拦的正是这种换着点也没用的空转。
+ */
+function linksPage(overrides: Partial<Observation> = {}): Observation {
+  return makeObservation({
+    actions: [1, 2, 3].map((node) =>
+      makeAction({ id: `e${node}`, kind: "click", label: `Link ${node}`, role: "link", node }),
+    ),
+    ...overrides,
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -231,6 +256,82 @@ test("act 抛 StalePage（输入前的新鲜度复查）时：决策作废、重
   assert.equal(session.observeCalls, 1, "作废之后必须重新观测一次");
 });
 
+test("连续丢弃达到上限判 blocked：点不到的目标不能无限重问模型", async () => {
+  // 这条来自一次真跑：弹窗里一个被滚动区裁掉的复选框，每次输入前都判 occluded。
+  // 丢弃的决策不产生 StepRecord（无进展检测看不到），模型也看不到上一次没点成，
+  // 于是同一个答案问了 16 次，直到 input token 预算耗尽。
+  const session = new FakeSession({
+    observations: [richPage()],
+    actError: new OccludedTarget("动作 e1（Home）在执行前变得不可用：元素中心点被别的元素盖住"),
+  });
+  const engine = createScriptedEngine({ steps: constantSteps(clickLink(), 20) });
+
+  const { report, events } = await runCase({ caseDef: makeCase(), session, engine });
+
+  assert.equal(report.status, "blocked");
+  assert.match(report.failureReason ?? "", new RegExp(`连续 ${MAX_CONSECUTIVE_DISCARDS} 次决策`));
+  assert.match(report.failureReason ?? "", /盖住/, "原因里要带上最近一次丢弃的理由，否则没法排查");
+  assert.equal(report.stats.decisions, MAX_CONSECUTIVE_DISCARDS, "到上限就停，不再多问一次");
+  assert.equal(session.actCount, MAX_CONSECUTIVE_DISCARDS);
+  assert.equal(report.steps.length, 0, "没有执行过的动作不能进轨迹");
+  assert.equal(eventsOf(events, "step.skipped").length, MAX_CONSECUTIVE_DISCARDS);
+});
+
+test("丢弃计数只算连续的：中间成功执行一步就清零", async () => {
+  // 每页指纹不同：页面一直在变，无进展检测不会先于被测的这道闸触发
+  const pages = Array.from({ length: 8 }, (_, i) => richPage({ fingerprint: `fp-${i}` }));
+  let acts = 0;
+  const session = new FakeSession({
+    observations: pages,
+    onAct: () => {
+      acts += 1;
+      // 每三次里前 MAX-1 次被拦：每一轮都差一次就到上限
+      if (acts % MAX_CONSECUTIVE_DISCARDS !== 0) throw new OccludedTarget("元素中心点被别的元素盖住");
+    },
+  });
+  const rounds = 2;
+  const engine = createScriptedEngine({
+    steps: [...constantSteps(clickLink(), MAX_CONSECUTIVE_DISCARDS * rounds), done()],
+  });
+
+  const { report, events } = await runCase({ caseDef: makeCase(), session, engine });
+
+  assert.equal(report.status, "done", "成功执行过就不是连续丢弃，不该判 blocked");
+  assert.equal(report.steps.length, rounds);
+  assert.equal(eventsOf(events, "step.skipped").length, (MAX_CONSECUTIVE_DISCARDS - 1) * rounds);
+});
+
+test("act 抛 InputInterrupted（输入发出途中失败）时：按已执行记录、绝不重来", async () => {
+  // 输入可能已经部分生效（例如全选成功、插入文本时页面被关）。若当成 StalePage
+  // 重新决策再执行一遍，就是 §6.2 要防的双执行。
+  const pageA = richPage({ fingerprint: "fp-a" });
+  const pageB = richPage({ fingerprint: "fp-b" });
+  let actThrows = true;
+
+  const session = new FakeSession({
+    observations: [pageA, pageB],
+    onAct: () => {
+      if (actThrows) {
+        actThrows = false;
+        throw new InputInterrupted("动作 e1 的输入发出途中失败，可能已部分生效：Target closed");
+      }
+    },
+  });
+  const engine = createScriptedEngine({
+    steps: [{ operation: { choice: "CLICK" }, targets: { click_target: { choice: "1" } } }, done()],
+  });
+
+  const { report, events } = await runCase({ caseDef: makeCase(), session, engine });
+
+  assert.equal(session.actCount, 1, "act 只被调用一次：可能已生效的输入不能重放");
+  assert.equal(report.steps.length, 1, "这一步必须进轨迹：它可能已经生效");
+  assert.equal(stepAt(report, 0).executed, true);
+  assert.equal(eventsOf(events, "step.skipped").length, 0, "不是作废");
+  assert.equal(report.status, "done", "不判成运行故障：由后续观测说明页面发生了什么");
+  const warn = events.find((event) => event.type === "run.log" && event.level === "warn");
+  assert.ok(warn !== undefined, "要留下一条 warn 说明这一步的结果不确定");
+});
+
 // ---------------------------------------------------------------------------
 // 不变量 2 + 3：变更不重试 / 先记日志再观测
 // ---------------------------------------------------------------------------
@@ -289,7 +390,7 @@ test("不变量 2：一次成功变更之后，文本缓存清空（不复用为
 // ---------------------------------------------------------------------------
 
 test("不变量 5：连续 N 步页面无变化且非 wait -> blocked", async () => {
-  const page = richPage({ fingerprint: "fp-stuck" });
+  const page = linksPage({ fingerprint: "fp-stuck" });
   const session = new FakeSession({ observations: [page] });
   const engine = createScriptedEngine({ steps: constantSteps(clickLink(), 5) });
 
@@ -299,11 +400,16 @@ test("不变量 5：连续 N 步页面无变化且非 wait -> blocked", async ()
   assert.equal(report.steps.length, DEFAULT_NO_PROGRESS_LIMIT, "第 3 次无变化即判定卡死");
   assert.equal(session.actCount, DEFAULT_NO_PROGRESS_LIMIT);
   assert.ok(report.steps.every((step) => step.pageChanged === false));
+  assert.deepEqual(
+    report.steps.map((step) => step.action),
+    ["Link 1", "Link 2", "Link 3"],
+    "点了没反应的链接不再是候选，换着点也照样判卡死",
+  );
   assert.match(report.failureReason ?? "", /连续 3 步/);
 });
 
 test("不变量 5：pageChanged 为 null 不计入连续计数（否则正常导航会被误判卡死）", async () => {
-  const page = richPage({ fingerprint: "fp-same" });
+  const page = linksPage({ fingerprint: "fp-same" });
   const session = new FakeSession({
     // 第一个动作之后观测失败（null），之后都是同一个页面（false）
     observations: [page, { error: new StalePage("导航打断了观测") }, page],
@@ -347,6 +453,104 @@ test("不变量 5：WAIT 不参与无进展计数（否则空转的等待会被�
   // 4 步都无变化，但其中两步是 wait：没有卡死判定，一路走到预算上限
   assert.equal(report.status, "budget_exceeded");
   assert.equal(report.steps.length, 4);
+});
+
+// ---------------------------------------------------------------------------
+// 点了没反应的目标：页面变化前不再提供
+// ---------------------------------------------------------------------------
+
+/** 记下每次决策请求的 scripted 引擎包装。 */
+function recording(inner: DecisionEngine): { engine: DecisionEngine; requests: DecisionRequest[] } {
+  const requests: DecisionRequest[] = [];
+  return {
+    requests,
+    engine: {
+      name: inner.name,
+      capabilities: inner.capabilities,
+      decide(req, signal) {
+        requests.push(req);
+        return inner.decide(req, signal);
+      },
+      writeText: (req, signal) => inner.writeText(req, signal),
+      close: () => inner.close(),
+    },
+  };
+}
+
+function clickLabels(req: DecisionRequest | undefined): string[] {
+  assert.ok(req !== undefined, "应当有这一次决策请求");
+  return req.state.elements.filter((element) => element.operations.includes("CLICK")).map((element) => element.label);
+}
+
+test("点了没反应的目标：页面变化前不再作为 CLICK 候选，页面一变就放回", async () => {
+  const session = new FakeSession({
+    // 第 0 步之后没变（fp-a），第 1 步之后变了（fp-b）
+    observations: [linksPage({ fingerprint: "fp-a" }), linksPage({ fingerprint: "fp-a" }), linksPage({ fingerprint: "fp-b" })],
+  });
+  const { engine, requests } = recording(createScriptedEngine({ steps: [clickLink(), clickLink(), done()] }));
+
+  const { report, events } = await runCase({ caseDef: makeCase(), session, engine });
+
+  assert.equal(report.status, "done");
+  assert.deepEqual(clickLabels(requests[0]), ["Link 1", "Link 2", "Link 3"]);
+  assert.deepEqual(clickLabels(requests[1]), ["Link 2", "Link 3"], "Link 1 点了没反应，这一步不再给");
+  assert.deepEqual(clickLabels(requests[2]), ["Link 1", "Link 2", "Link 3"], "页面变了，全部放回");
+  assert.deepEqual(
+    report.steps.map((step) => step.action),
+    ["Link 1", "Link 2"],
+  );
+  const logs = eventsOf(events, "run.log").map((event) => (event.type === "run.log" ? event.message : ""));
+  assert.equal(logs.filter((message) => message.includes("不再把它作为点击候选")).length, 1, logs.join("\n"));
+});
+
+test("点了没反应的目标：只剔除 CLICK，同一个输入框照样能输入", async () => {
+  const field = [
+    makeAction({ id: "e1", kind: "fill", label: "SKU", role: "textbox", node: 1 }),
+    makeAction({ id: "e2", kind: "click", label: "Open SKU", role: "textbox", node: 1 }),
+    makeAction({ id: "e3", kind: "click", label: "确定", role: "button", node: 2 }),
+  ];
+  const session = new FakeSession({ observations: [makeObservation({ actions: field })] });
+  const { engine, requests } = recording(
+    createScriptedEngine({
+      steps: [
+        { operation: { choice: "CLICK" }, targets: { click_target: { choice: "1" } } },
+        { operation: { choice: "DONE" } },
+      ],
+    }),
+  );
+
+  await runCase({ caseDef: makeCase(), session, engine });
+
+  const second = requests[1];
+  assert.ok(second !== undefined);
+  const sku = second.state.elements.find((element) => element.label === "SKU");
+  assert.deepEqual(sku?.operations, ["TYPE_TEXT"], "点不动的只是点击，输入不受影响");
+});
+
+test("页面提示：动作之后的提示记进 StepRecord，并随近期动作与当前页面一起交给引擎", async () => {
+  const before = linksPage({ fingerprint: "fp-a" });
+  const after = linksPage({ fingerprint: "fp-b", notices: ["请输入SKU"] });
+  const session = new FakeSession({ observations: [before, after] });
+  const { engine, requests } = recording(createScriptedEngine({ steps: [clickLink(), done()] }));
+
+  const { report } = await runCase({ caseDef: makeCase(), session, engine });
+
+  assert.deepEqual(stepAt(report, 0).notices, ["请输入SKU"]);
+  assert.deepEqual(requests[0]?.state.notices, []);
+  assert.deepEqual(requests[1]?.state.notices, ["请输入SKU"], "当前页面的提示");
+  assert.deepEqual(requests[1]?.state.recentActions[0]?.notices, ["请输入SKU"], "上一步之后弹出的提示");
+});
+
+test("页面提示：动作之后观测失败时不记提示（与 pageChanged: null 同一种「没看到」）", async () => {
+  const session = new FakeSession({
+    observations: [linksPage({ fingerprint: "fp-a" }), { error: new StalePage("导航打断") }, linksPage({ fingerprint: "fp-b" })],
+  });
+  const engine = createScriptedEngine({ steps: [clickLink(), done()] });
+
+  const { report } = await runCase({ caseDef: makeCase(), session, engine });
+
+  assert.equal(stepAt(report, 0).pageChanged, null);
+  assert.equal(stepAt(report, 0).notices, undefined);
 });
 
 // ---------------------------------------------------------------------------
@@ -420,6 +624,57 @@ test("取消：在步边界生效，已经开始的那次浏览器变更会做�
   assert.equal(session.actCount, 1, "已经开始的变更会做完，不会留下「点了一半」的状态");
   assert.equal(report.steps.length, 1, "轨迹保留");
   assert.match(report.failureReason ?? "", /取消/);
+});
+
+test("取消：落在等模型响应时，同样以 cancelled 正常返回并照常求值断言", async () => {
+  // 真实引擎收到 abort 会立刻中断 fetch 并抛出。此前这个异常冒到 runner，
+  // 报告的断言、准入、最终 URL 全是 null——而取消最常发生的恰恰就是这个时刻。
+  const controller = new AbortController();
+  const session = new FakeSession({ observations: [richPage({ fingerprint: "fp-0" })] });
+  const inner = createScriptedEngine({ steps: constantSteps(clickLink(), 3) });
+  const engine: DecisionEngine = {
+    ...inner,
+    name: inner.name,
+    capabilities: inner.capabilities,
+    decide: (_req, signal) => {
+      controller.abort();
+      signal.throwIfAborted();
+      return Promise.reject(new Error("unreachable"));
+    },
+  };
+
+  const { report } = await runCase({ caseDef: makeCase(), session, engine, signal: controller.signal });
+
+  assert.equal(report.status, "cancelled");
+  assert.equal(session.actCount, 0, "输入还没发出");
+  assert.notEqual(report.assertion, null, "页面已经观测到了：断言照常求值");
+  assert.notEqual(report.admission, null, "准入也已采集");
+  assert.match(report.failureReason ?? "", /取消/);
+});
+
+test("失败的模型调用也记账：重试耗尽后的请求数进 stats.modelCalls", async () => {
+  // 引擎在错误上挂了「已经发出 3 个请求」：它们真实发出、可能已计费。
+  // 只在成功时记账的话，报告里 modelCalls 是 0，重试失败就成了免费通道。
+  const caseDef = makeCase();
+  const session = new FakeSession({ observations: [richPage({ fingerprint: "fp-0" })] });
+  const inner = createScriptedEngine({ steps: constantSteps(clickLink(), 1) });
+  const failure = attachFailedCallUsage(new Error("HTTP 503，已重试 2 次仍失败"), {
+    usage: { inputTokens: 0, outputTokens: 0, costUsd: null, requests: 3 },
+    latencyMs: 12,
+  });
+  const engine: DecisionEngine = {
+    ...inner,
+    name: inner.name,
+    capabilities: inner.capabilities,
+    decide: () => Promise.reject(failure),
+  };
+  const budget = createBudgetMeter(caseDef.budget);
+  const agent = new CaseAgent({ session, engine, budget, events: { emit: () => {} }, caseDef });
+
+  // 引擎故障仍然让 run() 抛出（由 runner 写成 error），但账要先记上
+  await assert.rejects(() => agent.run(new AbortController().signal), /503/);
+  assert.equal(budget.stats().modelCalls, 3);
+  assert.equal(budget.stats().decisions, 0, "没有得到决策，不算一次逻辑决策");
 });
 
 test("取消：首个步边界之前就中止时不打开页面，也不产生断言结论", async () => {
@@ -572,4 +827,302 @@ test("正常路径：degenerate 分布下概率类检查标 skipped -> 整体判
     "有检查被跳过而无失败 => 未判定。判 true 就是 D9 要杜绝的谎报覆盖",
   );
   assert.equal(report.passed, null);
+});
+
+// ---------------------------------------------------------------------------
+// DONE / BLOCKED 要过半才结束运行
+// ---------------------------------------------------------------------------
+
+/**
+ * 每次都「<终止操作> 0.45、CLICK 0.40、其余平分 0.15」的引擎——实测那两次真跑的形状：
+ * 单项最大是终止操作，但过半的概率认为还能动。各 target head 都选第一个候选。
+ */
+function hesitantEngine(terminal: "DONE" | "BLOCKED"): DecisionEngine {
+  const inner = createScriptedEngine({ steps: [] });
+  return {
+    ...inner,
+    async decide(req) {
+      const answers: Record<string, Answer> = {};
+      for (const question of req.questions) {
+        const ids = question.options.map((option) => option.id);
+        let probabilities: Record<string, number>;
+        if (question.key === "operation") {
+          const rest = ids.filter((id) => id !== terminal && id !== "CLICK");
+          probabilities = Object.fromEntries(ids.map((id) => [id, 0.15 / rest.length]));
+          probabilities[terminal] = 0.45;
+          probabilities["CLICK"] = 0.4;
+        } else {
+          probabilities = Object.fromEntries(ids.map((id, index) => [id, index === 0 ? 1 : 0]));
+        }
+        const choice = question.key === "operation" ? terminal : (ids[0] ?? "");
+        answers[question.key] = {
+          key: question.key,
+          choice,
+          probabilities,
+          distribution: "full",
+          confidence: probabilities[choice] ?? 0,
+        };
+      }
+      return {
+        answers,
+        usage: { inputTokens: 1, outputTokens: 1, costUsd: null, requests: 1 },
+        latencyMs: 1,
+        engine: "hesitant",
+        raw: null,
+      };
+    },
+  };
+}
+
+test("BLOCKED 没过半不结束运行：改走次高的 CLICK 并留痕；替换次数用完后照常接受 BLOCKED", async () => {
+  // 每次动作后页面都变：排除「无进展检测」的干扰，只看这道闸本身
+  const pages = Array.from({ length: 6 }, (_, index) =>
+    richPage({ fingerprint: `fp-${index}`, url: `https://example.test/p${index}` }),
+  );
+  const session = new FakeSession({ observations: pages });
+
+  const { report, events } = await runCase({ caseDef: makeCase(), session, engine: hesitantEngine("BLOCKED") });
+
+  assert.equal(session.actCount, MAX_WEAK_TERMINAL_OVERRIDES, "每次替换都执行了一个真实动作");
+  assert.equal(report.steps.length, MAX_WEAK_TERMINAL_OVERRIDES);
+  for (const step of report.steps) {
+    assert.equal(step.operation, "CLICK");
+    assert.equal(step.operationProbability, 0.4, "记录的是 CLICK 自己的概率，而不是 BLOCKED 的");
+  }
+  assert.equal(report.status, "blocked", "次数用完后，没过半的 BLOCKED 也照常结束运行");
+
+  const warnings = events.filter(
+    (event) => event.type === "run.log" && event.level === "warn" && /没有过半/.test(event.message),
+  );
+  assert.equal(warnings.length, MAX_WEAK_TERMINAL_OVERRIDES, "每次替换都在事件里说明了原因");
+  const decided = eventsOf(events, "step.decided").map((event) => (event.type === "step.decided" ? event.operation : ""));
+  assert.deepEqual(decided, ["CLICK", "CLICK", "CLICK", "BLOCKED"], "step.decided 报的是实际走的操作");
+});
+
+test("DONE 没过半同样不结束运行；替换次数与 BLOCKED 共用，用完后照常接受并记进 terminalDecision", async () => {
+  const pages = Array.from({ length: 6 }, (_, index) =>
+    richPage({ fingerprint: `fp-${index}`, url: `https://example.test/p${index}` }),
+  );
+  const session = new FakeSession({ observations: pages });
+
+  const { report } = await runCase({ caseDef: makeCase(), session, engine: hesitantEngine("DONE") });
+
+  assert.equal(session.actCount, MAX_WEAK_TERMINAL_OVERRIDES);
+  assert.equal(report.status, "done");
+  assert.equal(report.terminalDecision?.operation, "DONE");
+  assert.equal(report.terminalDecision?.operationProbability, 0.45, "报告如实记下它是在低把握下结束的");
+  assert.equal(report.terminalDecision?.step, MAX_WEAK_TERMINAL_OVERRIDES);
+});
+
+// ---------------------------------------------------------------------------
+// 截图
+// ---------------------------------------------------------------------------
+
+/** 一个只数数的截图器：返回 0、1、2…，并记下被调了几次。 */
+function countingFrames(): { capture: () => Promise<number>; calls: () => number } {
+  let next = 0;
+  return {
+    capture: () => Promise.resolve(next++),
+    calls: () => next,
+  };
+}
+
+test("截图：每次观测一帧，StepRecord.frame 是操作前画面，finalFrame 是结束时那一页", async () => {
+  const pageA = richPage({ fingerprint: "fp-a", url: "https://example.test/a" });
+  const pageB = richPage({ fingerprint: "fp-b", url: "https://example.test/b" });
+  const session = new FakeSession({ observations: [pageA, pageB] });
+  const engine = createScriptedEngine({ steps: [clickLink(), done()] });
+  const frames = countingFrames();
+
+  const { report, events } = await runCase({ caseDef: makeCase(), session, engine, captureFrame: frames.capture });
+
+  assert.equal(report.status, "done");
+  assert.equal(stepAt(report, 0).frame, 0, "第 0 步是在起始页（第 0 帧）上决策的");
+  assert.equal(report.finalFrame, 1, "DONE 没有 StepRecord，它看到的那一页只能记在 finalFrame");
+  assert.equal(frames.calls(), 2, "同一次观测只截一次：结束时页面没再变，不补帧");
+  const observed = eventsOf(events, "step.observed").map((event) => (event.type === "step.observed" ? event.frame : -1));
+  assert.deepEqual(observed, [0, 1], "step.observed 带上本次观测的帧号，界面实时显示用它");
+});
+
+test("终止决策：DONE 不产生 StepRecord，但它的概率与所在页面记在 terminalDecision", async () => {
+  const pageA = richPage({ fingerprint: "fp-a", url: "https://example.test/a" });
+  const pageB = richPage({ fingerprint: "fp-b", url: "https://example.test/b" });
+  const session = new FakeSession({ observations: [pageA, pageB] });
+  const engine = createScriptedEngine({
+    steps: [
+      clickLink(),
+      { operation: { choice: "DONE", confidence: 0.55, probabilities: { CLICK: 0.3, TYPE_TEXT: 0, SCROLL_DOWN: 0, WAIT: 0.08, DONE: 0.62, BLOCKED: 0 } } },
+    ],
+  });
+  const frames = countingFrames();
+
+  const { report } = await runCase({ caseDef: makeCase(), session, engine, captureFrame: frames.capture });
+
+  assert.equal(report.status, "done");
+  assert.equal(report.steps.length, 1, "DONE 仍然不是一步");
+  const terminal = report.terminalDecision;
+  assert.ok(terminal, "以 DONE 结束的运行必须留下这次决策");
+  assert.equal(terminal.step, 1);
+  assert.equal(terminal.operation, "DONE");
+  assert.equal(terminal.operationProbability, 0.62);
+  assert.deepEqual(terminal.operationProbabilities, { CLICK: 0.3, TYPE_TEXT: 0, SCROLL_DOWN: 0, WAIT: 0.08, DONE: 0.62, BLOCKED: 0 });
+  assert.equal(terminal.distribution, "full");
+  assert.equal(terminal.url, "https://example.test/b", "记的是做决策时看到的那一页");
+  assert.equal(terminal.frame, 1);
+  assert.equal(terminal.frame, report.finalFrame);
+});
+
+test("终止决策：不是模型自己结束的运行（无进展闸）没有 terminalDecision", async () => {
+  const session = new FakeSession({
+    observations: [richPage({ fingerprint: "fp-same" }), richPage({ fingerprint: "fp-same" })],
+  });
+  const engine = createScriptedEngine({ steps: [clickLink(), clickLink()] });
+
+  const { report } = await runCase({
+    caseDef: makeCase({ assertions: { trajectory: { maxIdenticalConsecutive: 1 } } }),
+    session,
+    engine,
+  });
+
+  assert.equal(report.status, "blocked");
+  assert.equal(report.terminalDecision, null);
+});
+
+test("截图：循环在动作之后直接结束（无进展）时补一帧，finalFrame 不指向旧页面", async () => {
+  // 两个不同的对象、同一个指纹：真会话每次观测都产出新对象，而页面没变
+  const session = new FakeSession({
+    observations: [richPage({ fingerprint: "fp-same" }), richPage({ fingerprint: "fp-same" })],
+  });
+  const engine = createScriptedEngine({ steps: [clickLink(), clickLink(), clickLink(), clickLink()] });
+  const frames = countingFrames();
+
+  const { report } = await runCase({
+    caseDef: makeCase({ assertions: { trajectory: { maxIdenticalConsecutive: 1 } } }),
+    session,
+    engine,
+    captureFrame: frames.capture,
+  });
+
+  assert.equal(report.status, "blocked");
+  assert.equal(report.steps.length, 1);
+  assert.equal(stepAt(report, 0).frame, 0);
+  assert.equal(report.finalFrame, 1, "动作之后的那次观测也要有画面");
+});
+
+test("截图失败不影响运行：帧记 null，只警告一次", async () => {
+  const pageA = richPage({ fingerprint: "fp-a" });
+  const pageB = richPage({ fingerprint: "fp-b" });
+  const session = new FakeSession({ observations: [pageA, pageB] });
+  const engine = createScriptedEngine({ steps: [clickLink(), done()] });
+
+  const { report, events } = await runCase({
+    caseDef: makeCase(),
+    session,
+    engine,
+    captureFrame: () => Promise.reject(new Error("磁盘满了")),
+  });
+
+  assert.equal(report.status, "done", "截图是物证，不是运行的一部分");
+  assert.equal(stepAt(report, 0).frame, null);
+  assert.equal(report.finalFrame, null);
+  const warnings = eventsOf(events, "run.log").filter((event) => event.type === "run.log" && event.message.includes("截图失败"));
+  assert.equal(warnings.length, 1, "同一个原因每步重复一遍只是噪音");
+});
+
+test("不开截图时：帧全为 null", async () => {
+  const session = new FakeSession({ observations: [richPage({ fingerprint: "fp-a" }), richPage({ fingerprint: "fp-b" })] });
+  const engine = createScriptedEngine({ steps: [clickLink(), done()] });
+
+  const { report } = await runCase({ caseDef: makeCase(), session, engine });
+
+  assert.equal(stepAt(report, 0).frame, null);
+  assert.equal(report.finalFrame, null);
+});
+
+// ---------------------------------------------------------------------------
+// 读不到的跨域 iframe
+// ---------------------------------------------------------------------------
+
+test("BLOCKED 时页面上有读不到的跨域 iframe：失败原因点明它；运行中途出现就记 warn，数目不变不重复报", async () => {
+  // 这条来自一次真跑：目标表单在弹窗的 iframe 里，报告只剩一句「模型选择 BLOCKED」，
+  // 准入探测又只在起始页做过一次（那时还没有 iframe），得翻 trace 才知道原因。
+  const pageA = richPage({ fingerprint: "fp-a" });
+  const pageB = richPage({ fingerprint: "fp-b", unreadableFrames: 1 });
+  const pageC = richPage({ fingerprint: "fp-c", unreadableFrames: 1 });
+  const session = new FakeSession({ observations: [pageA, pageB, pageC] });
+  const engine = createScriptedEngine({ steps: [clickLink(), clickLink(), { operation: { choice: "BLOCKED" } }] });
+
+  const { report, events } = await runCase({ caseDef: makeCase(), session, engine });
+
+  assert.equal(report.status, "blocked");
+  assert.match(report.failureReason ?? "", /^模型选择 BLOCKED：.*；另外页面上有 1 个跨域 iframe，其中的内容读不到也操作不了/);
+  const warnings = eventsOf(events, "run.log").filter(
+    (event) => event.type === "run.log" && event.level === "warn" && event.message.includes("跨域 iframe"),
+  );
+  assert.equal(warnings.length, 1, "同样的 iframe 每步重复一遍只是噪音");
+  assert.match((warnings[0] as { message: string }).message, /^第 1 步/);
+});
+
+test("没有读不到的 iframe 时，BLOCKED 的失败原因保持原样", async () => {
+  const session = new FakeSession({ observations: [richPage()] });
+  const engine = createScriptedEngine({ steps: [{ operation: { choice: "BLOCKED" } }] });
+
+  const { report } = await runCase({ caseDef: makeCase(), session, engine });
+
+  assert.equal(report.failureReason, "模型选择 BLOCKED：它认为当前页面上没有任何受支持的操作能继续推进");
+});
+
+// ---------------------------------------------------------------------------
+// 白屏的 iframe：先等，不问模型
+// ---------------------------------------------------------------------------
+
+test("iframe 白屏时先等它渲染，不调用模型；渲染出来之后照常决策", async () => {
+  // 这条来自一次真跑：iframe 还在加载、画面全白，模型对着空壳回了 BLOCKED。
+  const blank = richPage({ fingerprint: "fp-blank", blankFrames: ["f1@100"] });
+  const ready = richPage({ fingerprint: "fp-ready" });
+  const session = new FakeSession({ observations: [blank, blank, ready] });
+  const seen: DecisionRequest[] = [];
+  const inner = createScriptedEngine({ steps: [done()] });
+  const engine: DecisionEngine = { ...inner, decide: (req, signal) => (seen.push(req), inner.decide(req, signal)) };
+  const sleeps: number[] = [];
+
+  const { report, events } = await runCase({
+    caseDef: makeCase(),
+    session,
+    engine,
+    sleep: async (ms) => {
+      sleeps.push(ms);
+    },
+  });
+
+  assert.equal(report.status, "done");
+  assert.equal(seen.length, 1, "白屏期间一次模型都不问");
+  assert.deepEqual(sleeps, [BLANK_FRAME_POLL_MS, BLANK_FRAME_POLL_MS]);
+  assert.ok(
+    eventsOf(events, "run.log").some((event) => event.type === "run.log" && event.message.includes("白屏")),
+    "等待要留痕：报告里看得出这段时间去哪了",
+  );
+});
+
+test("iframe 等满上限仍是白屏：交给模型并留 warn；同一个 iframe 文档之后不再等", async () => {
+  const blank = richPage({ fingerprint: "fp-blank", blankFrames: ["f1@100"] });
+  const session = new FakeSession({ observations: [blank] });
+  const engine = createScriptedEngine({ steps: [clickLink(), done()] });
+  let sleeps = 0;
+
+  const { report, events } = await runCase({
+    caseDef: makeCase(),
+    session,
+    engine,
+    sleep: async () => {
+      sleeps += 1;
+    },
+  });
+
+  assert.equal(report.status, "done");
+  assert.equal(sleeps, BLANK_FRAME_WAIT_MS / BLANK_FRAME_POLL_MS, "只在第一次遇到它时等满一次");
+  const warnings = eventsOf(events, "run.log").filter(
+    (event) => event.type === "run.log" && event.level === "warn" && event.message.includes("没有可操作的元素"),
+  );
+  assert.equal(warnings.length, 1);
 });

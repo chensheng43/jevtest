@@ -20,7 +20,15 @@
 
 import type { Case, CaseMode } from "../schema/case.ts";
 import type { ActionKind, Operation } from "../schema/events.ts";
-import type { Answer, BudgetView, DecisionRequest, DecisionResult, ElementIR, Question } from "../engine/types.ts";
+import type {
+  Answer,
+  BudgetView,
+  DecisionRequest,
+  DecisionResult,
+  ElementIR,
+  Question,
+  RecentActionIR,
+} from "../engine/types.ts";
 import type { Action, Observation } from "../browser/session.ts";
 import type { StepRecord } from "../schema/report.ts";
 import { InvalidDecision } from "./errors.ts";
@@ -131,9 +139,16 @@ export interface Resolved {
  *
  * `mode: "readonly"` 时，`fill`/`select` 动作与变更型 click 在此被剔除，
  * 因此 `targets` 里**根本不会有 TYPE_TEXT / SELECT 键**。
+ *
+ * `ineffectiveClicks` 里的节点不提供 CLICK（输入、选择照旧）：它们刚被点过而页面纹丝不动。
+ * 同样是构造期剔除，理由见 agent.ts 的 `ineffectiveClicks`。
  */
-export function buildActionSpace(actions: Action[], opts: { mode: CaseMode }): ActionSpace {
+export function buildActionSpace(
+  actions: Action[],
+  opts: { mode: CaseMode; ineffectiveClicks?: ReadonlySet<number> },
+): ActionSpace {
   const readonly = opts.mode === "readonly";
+  const ineffectiveClicks = opts.ineffectiveClicks ?? new Set<number>();
   const drafts = new Map<number, Action[]>();
   const controls: Record<string, Action> = {};
 
@@ -173,8 +188,14 @@ export function buildActionSpace(actions: Action[], opts: { mode: CaseMode }): A
   };
 
   let nextIndex = 0;
-  for (const bucket of drafts.values()) {
-    const element = buildIndexedElement(bucket, String(nextIndex + 1), readonly, targetHead);
+  for (const [node, bucket] of drafts) {
+    const element = buildIndexedElement(
+      bucket,
+      String(nextIndex + 1),
+      readonly,
+      ineffectiveClicks.has(node),
+      targetHead,
+    );
     // 一个什么操作都做不了的节点不进元素表：它只会占模型注意力与上下文，
     // 而模型对它的任何选择都会被 validateChoice 拒掉（它不在候选集里）。
     if (element === null) continue;
@@ -203,13 +224,15 @@ function buildIndexedElement(
   bucket: Action[],
   index: string,
   readonly: boolean,
+  clickIneffective: boolean,
   targetHead: (operation: Operation) => Record<string, Action>,
 ): ElementIR | null {
   const click = bucket.find((action) => action.kind === "click");
   const fill = bucket.find((action) => action.kind === "fill");
   const selects = bucket.filter((action) => action.kind === "select");
 
-  const clickAllowed = click !== undefined && !(readonly && blocksClickInReadonly(click));
+  const clickAllowed =
+    click !== undefined && !clickIneffective && !(readonly && blocksClickInReadonly(click));
   const fillAllowed = fill !== undefined && !readonly;
   // 原生下拉的每个未被选中的 option 都是一条 select 动作；全都被选中或禁用时为空，
   // 此时这个元素没有任何 SELECT 目标，只读模式下也就什么都不剩。
@@ -352,19 +375,31 @@ export function buildDecisionRequest(input: {
       title: page.title,
       text: page.text,
       textTruncated: page.textTruncated,
+      notices: page.notices,
+      ...(page.unreadableFrames ? { unreadableFrames: page.unreadableFrames } : {}),
       elements: space.elements,
-      recentActions: history.slice(-RECENT_ACTIONS).map((step) => ({
-        action: step.action,
-        kind: step.kind,
-        text: step.text,
-        pageChanged: step.pageChanged,
-      })),
+      recentActions: recentActions(history),
       omittedActions: page.omittedActions,
+      scroll: { y: page.scroll.y, height: page.scroll.height, viewportHeight: page.h },
     },
     // budget 原样带上：引擎据此自行裁剪上下文，runner 不必猜它还剩多少额度。
     questions: buildQuestions(space),
     budget,
   };
+}
+
+/**
+ * 最近的若干步，供决策请求与文本取值参考（参考项目 model.py:113 取 10 条）。
+ * 两处共用这一个函数：各拼一份的话，给其中一处加字段（例如 notices）时另一处会被漏掉。
+ */
+export function recentActions(history: StepRecord[]): RecentActionIR[] {
+  return history.slice(-RECENT_ACTIONS).map((step) => ({
+    action: step.action,
+    kind: step.kind,
+    text: step.text,
+    pageChanged: step.pageChanged,
+    ...(step.notices === undefined ? {} : { notices: step.notices }),
+  }));
 }
 
 /** 问题的 key。operation 恒为 `"operation"`，其余为 `<operation>_target` 小写。 */
@@ -607,8 +642,81 @@ export function resolveDecision(space: ActionSpace, decision: DecisionResult): R
   const operationAnswer = validateChoice(rawOperationAnswer, operationQuestion);
   // 候选集只由 Operation 字面量构成（usableOperations），因此这个收窄是可靠的。
   const operation = operationAnswer.choice as Operation;
+  return resolveOperation(space, questions, decision, operationAnswer, operation, operationAnswer.confidence);
+}
+
+/**
+ * 终止操作（DONE / BLOCKED）至少要有这么大的概率，才结束运行。
+ *
+ * 终止是不可逆的：它直接结束运行，而别的操作走错了一步，下一步还能纠正。
+ * 所以对它不能只看「是不是最大项」，还要看是不是**过半**。两次真跑各撞上一边：
+ *   - BLOCKED 0.46、CLICK 0.35、TYPE_TEXT 0.15（页面刚加载完）——超过一半的概率认为「还能动」，
+ *     却因为 BLOCKED 单项最大而结束了整个运行；
+ *   - DONE 0.41、CLICK 0.33、BLOCKED 0.18（导入弹窗里「确定」还没点）——一条无关的「成功」通知
+ *     让模型以为做完了，但它自己也只有四成把握。
+ */
+export const TERMINAL_MIN_PROBABILITY = 0.5;
+
+/**
+ * 一次运行里最多替换几次「没过半的终止决策」（DONE 与 BLOCKED 合计）。
+ * 真卡死、或真做完了但模型拿不准的页面上，它会一直这样犹豫；次数用完之后照常接受，
+ * 不让它靠替换出来的动作一直耗到预算上限。
+ */
+export const MAX_WEAK_TERMINAL_OVERRIDES = 3;
+
+/**
+ * 终止决策没过半时，改走概率最大的**非终止**操作（及其目标 head 的选择）。
+ * 返回 `null` = 不替换，照常接受这个终止决策：
+ *   - 不是 DONE / BLOCKED，或它已过半；
+ *   - 分布是合成的（degenerate）：没有真概率可比；
+ *   - 替换目标的回答不可用（该 head 缺失或不合法）。只校验被选中的 head 是
+ *     resolveDecision 的纪律，一个没被选中的 head 答坏了，不该让整步失败。
+ *
+ * 替换后的 `operationProbability` / `confidence` 如实是那个操作自己的概率（比如 0.35），
+ * 报告里看得出这一步是在低把握下走的。
+ */
+export function overrideWeakTerminal(
+  space: ActionSpace,
+  decision: DecisionResult,
+  resolved: Resolved,
+): Resolved | null {
+  if (!isTerminal(resolved.operation) || resolved.distribution !== "full") return null;
+  if (resolved.operationProbability >= TERMINAL_MIN_PROBABILITY) return null;
+
+  const questions = buildQuestions(space);
+  const operationQuestion = questions.find((question) => question.key === "operation");
+  const rawOperationAnswer = decision.answers["operation"];
+  if (operationQuestion === undefined || rawOperationAnswer === undefined) return null;
+  const operationAnswer = validateChoice(rawOperationAnswer, operationQuestion);
+
+  let best: Operation | null = null;
+  for (const option of operationQuestion.options) {
+    const candidate = option.id as Operation;
+    if (isTerminal(candidate)) continue;
+    if (best === null || probabilityOf(operationAnswer, candidate) > probabilityOf(operationAnswer, best)) {
+      best = candidate;
+    }
+  }
+  if (best === null || probabilityOf(operationAnswer, best) <= 0) return null;
+
+  try {
+    return resolveOperation(space, questions, decision, operationAnswer, best, probabilityOf(operationAnswer, best));
+  } catch (error) {
+    if (error instanceof InvalidDecision) return null;
+    throw error;
+  }
+}
+
+/** 已选定 `operation` 之后的解析：终止 / 页面级 / 带目标三种，见 resolveDecision */
+function resolveOperation(
+  space: ActionSpace,
+  questions: Question[],
+  decision: DecisionResult,
+  operationAnswer: Answer,
+  operation: Operation,
+  operationConfidence: number,
+): Resolved {
   const operationProbability = probabilityOf(operationAnswer, operation);
-  const operationConfidence = operationAnswer.confidence;
 
   if (isTerminal(operation)) {
     return {

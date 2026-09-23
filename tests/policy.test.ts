@@ -24,6 +24,7 @@ import {
   buildActionSpace,
   buildDecisionRequest,
   isTerminal,
+  overrideWeakTerminal,
   resolveDecision,
   targetQuestionKey,
 } from "../src/core/policy.ts";
@@ -70,6 +71,7 @@ function observation(actions: Action[], overrides: Partial<Observation> = {}): O
     scroll: { y: 0, height: 2000 },
     actions,
     omittedActions: 0,
+    notices: [],
     marker: null,
     pageKey: null,
     guards: {},
@@ -227,6 +229,23 @@ test("一个节点只拿一个索引，即使它同时可点可输入", () => {
   // 后者描述的是「点开这个字段」，不是这个字段叫什么（snapshot.js:117）。
   assert.equal(space.elements[1]?.label, "搜索");
   assert.equal(space.targets["CLICK"]?.["2"]?.label, "Open 搜索");
+});
+
+test("ineffectiveClicks：只收回该节点的 CLICK，输入保留；只剩 CLICK 的节点整行退出元素表", () => {
+  const actions = [click(1, "确定"), ...editable(2, "SKU", ""), click(3, "关闭")];
+  const space = buildActionSpace(actions, { mode: "interactive", ineffectiveClicks: new Set([1, 2]) });
+
+  assert.deepEqual(
+    space.elements.map((element) => [element.label, element.operations]),
+    [
+      ["SKU", ["TYPE_TEXT"]],
+      ["关闭", ["CLICK"]],
+    ],
+  );
+  // 索引照旧在可用元素上连续，不给被剔除的节点留空号
+  assert.deepEqual(Object.keys(space.targets["CLICK"] ?? {}), ["2"]);
+  assert.equal(space.targets["CLICK"]?.["2"]?.label, "关闭");
+  assert.equal(space.targets["TYPE_TEXT"]?.["1"]?.label, "SKU");
 });
 
 test("原生下拉的每个 option 是独立 target，key 形如 3:1", () => {
@@ -417,6 +436,38 @@ test("recentActions 取最后 10 条且保持时间顺序", () => {
     request.state.recentActions.map((recent) => recent.action),
     ["动作16", "动作17", "动作18", "动作19", "动作20", "动作21", "动作22", "动作23", "动作24", "动作25"],
   );
+});
+
+test("读不到的跨域 iframe 数进请求；为 0 或缺省时不带这个键", () => {
+  const actions = [click(1, "确定")];
+  const request = (page: Observation) =>
+    buildDecisionRequest({
+      caseDef: mkCase(),
+      page,
+      space: buildActionSpace(actions, { mode: "interactive" }),
+      history: [],
+      budget: budgetView(),
+    });
+
+  assert.equal(request(observation(actions, { unreadableFrames: 2 })).state.unreadableFrames, 2);
+  assert.equal("unreadableFrames" in request(observation(actions, { unreadableFrames: 0 })).state, false);
+  assert.equal("unreadableFrames" in request(observation(actions)).state, false);
+});
+
+test("页面提示：当前页的 notices 与每一步之后的 notices 都进请求；老记录里没有就不带这个键", () => {
+  const actions = [click(1, "确定")];
+  const history = [{ ...step(1), notices: ["请输入SKU"] }, step(2)];
+  const request = buildDecisionRequest({
+    caseDef: mkCase(),
+    page: observation(actions, { notices: ["请输入SKU"] }),
+    space: buildActionSpace(actions, { mode: "interactive" }),
+    history,
+    budget: budgetView(),
+  });
+
+  assert.deepEqual(request.state.notices, ["请输入SKU"]);
+  assert.deepEqual(request.state.recentActions[0]?.notices, ["请输入SKU"]);
+  assert.equal("notices" in (request.state.recentActions[1] ?? {}), false);
 });
 
 test("goal、rules、omittedActions、budget 原样带上；omittedActions 口径来自观测", () => {
@@ -699,3 +750,92 @@ function questionOf(space: ReturnType<typeof buildActionSpace>, key: string): Qu
   assert.ok(found !== undefined, `动作空间里没有 "${key}" 问题`);
   return found;
 }
+
+// ---------------------------------------------------------------------------
+// overrideWeakTerminal：DONE / BLOCKED 要过半才结束运行
+// ---------------------------------------------------------------------------
+
+/** click + 滚动 + 等待都在：operation 候选是 CLICK / SCROLL_UP / SCROLL_DOWN / WAIT / DONE / BLOCKED */
+function richSpace(): ReturnType<typeof buildActionSpace> {
+  return buildActionSpace([click(1, "批量导入产品库"), click(2, "导入设置"), SCROLL_UP, SCROLL_DOWN, WAIT], {
+    mode: "interactive",
+  });
+}
+
+function weakBlocked(blocked: number, rest: Record<string, number>, extra: Record<string, unknown> = {}): DecisionResult {
+  return decision({
+    operation: answer("operation", "BLOCKED", { BLOCKED: blocked, ...rest }, blocked),
+    click_target: answer("click_target", "2", { "1": 0.3, "2": 0.7 }, 0.7),
+    ...extra,
+  });
+}
+
+test("BLOCKED 没过半：改走概率最大的非终止操作，目标用该 head 自己的选择（实测那次：0.46 / 0.35）", () => {
+  const space = richSpace();
+  const result = weakBlocked(0.46, { CLICK: 0.35, SCROLL_UP: 0.02, SCROLL_DOWN: 0.15, WAIT: 0.01, DONE: 0.01 });
+  const decided = resolveDecision(space, result);
+  assert.equal(decided.operation, "BLOCKED");
+
+  const override = overrideWeakTerminal(space, result, decided);
+  assert.ok(override !== null);
+  assert.equal(override.operation, "CLICK");
+  assert.equal(override.target, "2");
+  assert.equal(override.action, space.targets["CLICK"]?.["2"], "动作必须是动作空间里那一个对象");
+  // 如实记录：这一步是在 0.35 的把握下走的，不是模型说的 0.46
+  assert.equal(override.operationProbability, 0.35);
+  assert.equal(override.confidence, 0.35);
+});
+
+test("BLOCKED 过半：照常结束，不替换", () => {
+  const space = richSpace();
+  const result = weakBlocked(0.58, { CLICK: 0.3, SCROLL_UP: 0.02, SCROLL_DOWN: 0.08, WAIT: 0.01, DONE: 0.01 });
+  assert.equal(overrideWeakTerminal(space, result, resolveDecision(space, result)), null);
+});
+
+test("非终止操作里最大的是页面级操作：改走它（没有目标）", () => {
+  const space = richSpace();
+  const result = weakBlocked(0.4, { CLICK: 0.1, SCROLL_UP: 0.05, SCROLL_DOWN: 0.3, WAIT: 0.14, DONE: 0.01 });
+  const override = overrideWeakTerminal(space, result, resolveDecision(space, result));
+  assert.equal(override?.operation, "SCROLL_DOWN");
+  assert.equal(override?.target, null);
+  assert.equal(override?.action, space.controls["SCROLL_DOWN"]);
+});
+
+test("DONE 没过半同样不结束运行（实测那次：DONE 0.41 / CLICK 0.33 / BLOCKED 0.18）", () => {
+  // 断言只能在事后判它失败，拦不住运行提前结束——弹窗里的「确定」一直没点
+  const space = richSpace();
+  const result = decision({
+    operation: answer("operation", "DONE", { DONE: 0.41, CLICK: 0.33, SCROLL_UP: 0, SCROLL_DOWN: 0.04, WAIT: 0.04, BLOCKED: 0.18 }, 0.28),
+    click_target: answer("click_target", "2", { "1": 0.3, "2": 0.7 }, 0.7),
+  });
+  const override = overrideWeakTerminal(space, result, resolveDecision(space, result));
+  assert.equal(override?.operation, "CLICK", "BLOCKED 虽然也高，但它同样是终止操作，不在替换候选里");
+  assert.equal(override?.target, "2");
+  assert.equal(override?.operationProbability, 0.33);
+});
+
+test("DONE 过半：照常结束，不替换", () => {
+  const space = richSpace();
+  const result = decision({
+    operation: answer("operation", "DONE", { DONE: 0.62, CLICK: 0.3, SCROLL_UP: 0, SCROLL_DOWN: 0.04, WAIT: 0.04, BLOCKED: 0 }),
+  });
+  assert.equal(overrideWeakTerminal(space, result, resolveDecision(space, result)), null);
+});
+
+test("合成分布（degenerate）没有真概率可比：不替换", () => {
+  const space = richSpace();
+  const result = decision({ operation: answer("operation", "BLOCKED") });
+  const decided = resolveDecision(space, result);
+  assert.equal(decided.distribution, "degenerate");
+  assert.equal(overrideWeakTerminal(space, result, decided), null);
+});
+
+test("替换目标的 head 答坏了：不替换、也不让整步失败，照常接受 BLOCKED", () => {
+  const space = richSpace();
+  const result = weakBlocked(
+    0.46,
+    { CLICK: 0.35, SCROLL_UP: 0.02, SCROLL_DOWN: 0.15, WAIT: 0.01, DONE: 0.01 },
+    { click_target: { choice: "99" } },
+  );
+  assert.equal(overrideWeakTerminal(space, result, resolveDecision(space, result)), null);
+});

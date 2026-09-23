@@ -27,6 +27,9 @@ export interface Rect {
  * （参考项目 `snapshot.js:4-8`）。它只在单次文档生命周期内有效——
  * 节点被替换会拿到新身份，导航会重置整个缓存。
  * **它不是 CDP 的 backendNodeId，也不是 CSS 选择器，模型无法伪造。**
+ *
+ * 同源 iframe 里的元素也在同一张表里：`id` 形如 `f1:e7`，`node` 由 Session 实现编码成
+ * 全页唯一的数（见 playwright-session.ts 的 `FRAME_NODE_STRIDE`）。core 不需要知道 frame 的存在。
  */
 export interface Action {
   id: string;
@@ -57,6 +60,24 @@ export interface Observation {
   actions: Action[];
   /** 因超出上限被丢弃的候选数。模型据此知道「还有东西没看到」 */
   omittedActions: number;
+  /**
+   * 当前可见的页面提示（toast / alert / 表单校验），每条已压成一行。
+   * 文字同样在 `text` 里，单独给出是为了让模型与报告不必在几千字里找它——
+   * 一条「请输入SKU」埋在正文中间时，模型分不清它和同名的输入框占位符。
+   */
+  notices: string[];
+  /**
+   * 视口里看得见、内容却读不到的跨域 iframe 数。缺省即 0。
+   * 同源 iframe 的元素与文本已经并进 `actions` / `text`；跨域的读不到也点不了，
+   * 单独计数是为了让模型与报告知道「这里有一块看不见的内容」，而不是只剩一句 BLOCKED。
+   */
+  unreadableFrames?: number;
+  /**
+   * 看得见（至少占视口 1/4）、却一个可操作元素都没有的同源 iframe，每项形如 `f1@<timeOrigin>`：
+   * frame 序号加它当前文档的身份，iframe 换了文档就是另一项。缺省即没有。
+   * 这几乎总是「iframe 还在加载、画面是白的」——agent 据此先等它渲染，而不是拿空壳去问模型。
+   */
+  blankFrames?: string[];
 
   /** 整页语义标记。用于 wait / scroll / fill 等动作的新鲜度比较 */
   marker: unknown;

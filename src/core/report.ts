@@ -34,7 +34,7 @@ import { FROZEN_CASE_FILE } from "../store/cases.ts";
 import { migrateReportDocument } from "../store/migrations.ts";
 import { STATUS_LABELS } from "./runner.ts";
 import type { Case, CaseRevision } from "../schema/case.ts";
-import type { CaseRunReport, CheckResult, RunIndexEntry, StepRecord } from "../schema/report.ts";
+import type { CaseRunReport, CheckResult, RunIndexEntry, StepRecord, TerminalDecision } from "../schema/report.ts";
 
 export interface PersistOptions {
   runsDir: string;
@@ -79,7 +79,9 @@ export function buildReport(input: {
   passed: boolean | null;
   failureReason: string | null;
   finalUrl: string | null;
+  finalFrame: number | null;
   steps: CaseRunReport["steps"];
+  terminalDecision: TerminalDecision | null;
   guardrailHits: CaseRunReport["guardrailHits"];
   assertion: CaseRunReport["assertion"];
   stats: CaseRunReport["stats"];
@@ -110,8 +112,10 @@ export function buildReport(input: {
     goal: input.caseDef.goal,
     startUrl: input.caseDef.startUrl,
     finalUrl: input.finalUrl,
+    finalFrame: input.finalFrame,
 
     steps: input.steps,
+    terminalDecision: input.terminalDecision,
     guardrailHits: input.guardrailHits,
     assertion: input.assertion,
     stats: input.stats,
@@ -225,7 +229,7 @@ export async function readIndex(runsDir: string): Promise<RunIndexEntry[]> {
       continue; // 坏行：跳过，让列表仍然打得开（docs/report-format.md §1）
     }
 
-    const parsed = runIndexEntrySchema.safeParse(raw);
+    const parsed = runIndexEntrySchema.safeParse(withLegacyTokens(raw));
     if (!parsed.success) continue;
     entries.push(parsed.data);
   }
@@ -234,6 +238,18 @@ export async function readIndex(runsDir: string): Promise<RunIndexEntry[]> {
   // ——它们仍然可见（不丢数据），但不干扰正常排序。`Array.sort` 稳定，
   // 时间相同的两条保持文件里的先后。
   return entries.sort((a, b) => timestampOf(b.startedAt) - timestampOf(a.startedAt));
+}
+
+/**
+ * 加 `inputTokens` / `outputTokens` 之前写下的行没有这两个键。
+ * 它们只是当时没记，不是坏行——补成 null（未知）让它们照常列出来，
+ * 而不是被 schema 当坏行跳过、让历史凭空少一截。只补**缺失**的键，已有的值原样交给 schema 判。
+ */
+function withLegacyTokens(raw: unknown): unknown {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return raw;
+  const row = raw as Record<string, unknown>;
+  if ("inputTokens" in row && "outputTokens" in row) return raw;
+  return { inputTokens: null, outputTokens: null, ...row };
 }
 
 function timestampOf(iso: string): number {
@@ -303,6 +319,8 @@ async function indexEntryOf(report: CaseRunReport, reportDir: string): Promise<R
     passed: report.passed,
     elapsedMs: report.elapsedMs,
     steps: report.steps.length,
+    inputTokens: report.stats.inputTokens,
+    outputTokens: report.stats.outputTokens,
     // 与报告里同一纪律：未知就是 null，不能用 0 冒充。
     costUsd: report.stats.costUsd,
   };
@@ -552,6 +570,11 @@ export function toMarkdown(report: CaseRunReport): string {
       }
     }
   }
+  // 终止决策不在轨迹表里（它没执行动作），但「模型凭多大把握说完成了」是排查提前结束的第一现场
+  const terminal = report.terminalDecision ?? null;
+  if (terminal !== null) {
+    lines.push("", terminalDecisionLine(terminal));
+  }
 
   if (report.guardrailHits.length > 0) {
     lines.push("", `## 护栏命中（${report.guardrailHits.length} 次）`, "");
@@ -595,6 +618,23 @@ function shortDigest(digest: string): string {
 function executionLabel(step: StepRecord): string {
   if (step.executed) return "已执行";
   return `被护栏拦下（${step.blockReason ?? "原因未记录"}）`;
+}
+
+/** 例：`第 5 步模型回 DONE 结束了运行：操作概率 0.62（CLICK 0.30 / WAIT 0.08），置信 0.55` */
+function terminalDecisionLine(terminal: TerminalDecision): string {
+  const head = `第 ${terminal.step} 步模型回 **${terminal.operation}** 结束了运行`;
+  if (terminal.distribution === "degenerate") {
+    return `${head}（引擎只给了单一选择，没有真实概率可看）`;
+  }
+  const others = Object.entries(terminal.operationProbabilities)
+    .filter(([operation]) => operation !== terminal.operation)
+    .sort(([, a], [, b]) => b - a)
+    .map(([operation, probability]) => `${operation} ${probability.toFixed(2)}`);
+  return (
+    `${head}：操作概率 ${terminal.operationProbability.toFixed(2)}` +
+    (others.length > 0 ? `（${others.join(" / ")}）` : "") +
+    `，置信 ${terminal.confidence.toFixed(2)}`
+  );
 }
 
 function pageChangedLabel(step: StepRecord): string {

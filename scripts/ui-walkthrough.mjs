@@ -95,7 +95,11 @@ try {
     if (message.text().includes("400 (Bad Request)")) return;
     problems.push(`console.error: ${message.text()}`);
   });
-  page.on("dialog", (dialog) => dialog.accept());
+  // 界面不该再弹原生对话框（确认一律走 <dialog>）；离开有未保存修改的页面时的 beforeunload 除外
+  page.on("dialog", (dialog) => {
+    if (dialog.type() !== "beforeunload") problems.push(`弹出了原生 ${dialog.type()} 对话框：${dialog.message()}`);
+    void dialog.accept();
+  });
   page.on("response", (response) => {
     const status = response.status();
     if (status < 400) return;
@@ -103,16 +107,22 @@ try {
     problems.push(`HTTP ${status} ${response.url()}`);
   });
   const shot = (name) => page.screenshot({ path: join(shotsDir, `${name}.png`), fullPage: true });
+  /** 等一条 toast 出现，返回它的文字 */
+  const toastText = async () => (await page.locator(".toast-item").last().textContent())?.trim();
+  /** 点 <dialog> 里的确认按钮 */
+  const confirmDialog = async () => {
+    await page.waitForSelector("dialog.confirm-dialog[open]");
+    await page.click("dialog.confirm-dialog [data-confirm]");
+  };
 
-  // ------------------------------------------------------------------ 导入页
+  // ------------------------------------------------------------------ 新建页
   await page.goto(`${base}/#/new`);
-  await page.waitForSelector(".entry-choice-item");
-  ok("导入页：两条入口并列", `entry-choice-item=${await page.locator(".entry-choice-item").count()}`);
-  await page.waitForSelector(".drop-zone");
-  const readonly = await page.locator("#app input[readonly]").count();
-  if (readonly !== 0) problems.push(`导入页还有 ${readonly} 个只读输入框（应已删除）`);
-  else ok("导入页：只读的「文件名」输入框已删除");
-  await shot("01-import");
+  await page.waitForSelector(".new-grid");
+  ok("新建页：手填与导入两个入口并列", `panel=${await page.locator(".new-grid .panel").count()}`);
+  await page.getByRole("button", { name: "导入", exact: true }).click();
+  await page.waitForSelector(".error-slot .callout--danger");
+  ok("空内容点导入：页面错误槽说清原因", (await page.locator(".error-slot .callout-title").textContent())?.trim());
+  await shot("01-new");
 
   // ---------------------------------------------------- 粘贴 YAML 导入种子
   await page.fill("#app textarea", SEED);
@@ -122,18 +132,8 @@ try {
   ok("粘贴导入种子用例", `#/case/${importedId}`);
 
   // --------------------------------------------------- 载入后：断言有没有丢
-  await page.waitForSelector("#tab-assertions");
-  await page.click("#tab-assertions");
-  ok("断言档：配方行",
-    `角标="${await page.locator("#tab-assertions .tab-badge").textContent()}" 行数=${await page.locator(".recipe-row").count()}`);
-
-  const rawRows = await page.locator(".disclosure[open] .raw-row").count();
-  if (rawRows === 0) {
-    problems.push("「其他（配方之外的断言字段）」没有默认展开——载入的 mustUse / minOperationProbability 看不见");
-  } else {
-    ok("「其他」默认展开且列出原始行",
-      (await page.locator(".raw-row .raw-row-label").allTextContents()).join(" / "));
-  }
+  await page.waitForSelector("#sec-assertions .recipe-row");
+  ok("断言节：配方行", `行数=${await page.locator("#sec-assertions .recipe-row").count()} 目录计数="${await page.locator('.editor-nav-link[data-section="assertions"] .nav-count').textContent()}"`);
 
   const role = await page.locator('.raw-row input[data-path="assertions.trajectory.mustUse.0.role"]').inputValue();
   if (role !== "searchbox") problems.push(`mustUse 的 role 没读出来（得到 "${role}"）`);
@@ -142,40 +142,48 @@ try {
   const minOp = await page.locator('input[data-path="assertions.quality.minOperationProbability"]').inputValue();
   if (minOp !== "0.4") problems.push(`minOperationProbability 没读出来（得到 "${minOp}"）`);
   else ok("原始字段读回了 quality.minOperationProbability", minOp);
-  await shot("02-assertions");
+  await shot("02-editor");
 
-  const disabled = await page.getByRole("button", { name: "保存", exact: true }).isDisabled();
-  if (!disabled) problems.push("没改动时「保存」应该是禁用的");
+  const saveButton = page.getByRole("button", { name: "保存", exact: true });
+  if (!(await saveButton.isDisabled())) problems.push("没改动时「保存」应该是禁用的");
   else ok("未改动时「保存」为禁用");
 
-  // ------------------------------------------------ 改一条断言 → 保存 → 重载
-  // 种子用例里本来就是 "incompleteness"——填成一样的值不算改动（脏标记比的是
-  // 语义不是击键），所以这里故意换个值。
-  await page.fill('input[data-path="assertions.final.text.contains.0"]', "Gödel");
-  if (!(await page.locator(".dirty-badge").isVisible())) {
-    problems.push("改了断言却没有出现「有未保存的修改」");
-  } else {
-    ok("改动后出现「有未保存的修改」");
-  }
-  await page.getByRole("button", { name: "保存", exact: true }).click();
-  await page.waitForSelector(".alert-success");
-  ok("保存成功", (await page.locator(".alert-success").textContent())?.trim());
+  // 原始行的改动也要标脏（旧版不会：保存按钮一直灰着）
+  await page.fill('.raw-row input[data-path="assertions.trajectory.mustUse.0.role"]', "textbox");
+  if (await saveButton.isDisabled()) problems.push("改了原始行却没有标脏");
+  else ok("改原始行也会标脏");
+  await page.fill('.raw-row input[data-path="assertions.trajectory.mustUse.0.role"]', "searchbox");
 
-  // 再存一次：旧代码的第二次必然 409（revision 从不回写）。
+  // ------------------------------------------- 改一条断言 → 双击保存 → 重载
+  await page.fill('input[data-path="assertions.final.text.contains.0"]', "Gödel");
+  if (!(await page.locator(".dirty-badge").isVisible())) problems.push("改了断言却没有出现「有未保存的修改」");
+  else ok("改动后出现「有未保存的修改」");
+  // 双击：旧版第二次必然 409（假冲突）。现在按钮在执行期间是禁用的
+  await saveButton.dblclick();
+  await page.waitForSelector(".toast-item");
+  ok("双击保存只存一次", await toastText());
+  if ((await page.locator(".error-slot .callout--danger").count()) > 0) problems.push("双击保存出现了错误（假冲突？）");
+
   await page.fill('input[data-path="assertions.final.text.contains.0"]', "incompleteness_theorems");
-  await page.getByRole("button", { name: "保存", exact: true }).click();
-  await page.waitForSelector(".alert-success");
-  ok("第二次保存也成功（revision 已回写）", (await page.locator(".alert-success").textContent())?.trim());
+  await page.keyboard.press(process.platform === "darwin" ? "Meta+s" : "Control+s");
+  await page.waitForFunction(() => document.querySelectorAll(".toast-item").length >= 2 || document.querySelector(".toast-item")?.textContent.includes("r3"));
+  ok("快捷键保存（revision 已回写，不 409）", await toastText());
 
   await page.reload();
-  await page.waitForSelector("#tab-assertions");
-  await page.click("#tab-assertions");
+  await page.waitForSelector("#sec-assertions .recipe-row");
   const kept = await page.locator('input[data-path="assertions.final.text.contains.0"]').inputValue();
   if (kept !== "incompleteness_theorems") problems.push(`重载后断言值不对：${kept}`);
   else ok("重载后断言值保持", kept);
-  const roleAfter = await page.locator('.raw-row input[data-path="assertions.trajectory.mustUse.0.role"]').inputValue();
-  if (roleAfter !== "searchbox") problems.push(`重载后 mustUse.role 丢了：${roleAfter}`);
-  else ok("重载后 mustUse.role 仍在", roleAfter);
+
+  // ------------------------------------------------------ 离开确认用 <dialog>
+  await page.fill('input[data-path="title"]', "改了但不保存");
+  await page.click('#nav a[data-nav="runs"]');
+  await page.waitForSelector("dialog.confirm-dialog[open]");
+  ok("有未保存修改时离开：弹出确认框", (await page.locator(".dialog-title").textContent())?.trim());
+  await page.click("dialog.confirm-dialog button:not([data-confirm])");
+  if (!(await page.locator('input[data-path="title"]').isVisible())) problems.push("点了「留下」却离开了编辑器");
+  else ok("点「留下」后草稿还在", await page.locator('input[data-path="title"]').inputValue());
+  await page.fill('input[data-path="title"]', "Wikipedia 打开哥德尔不完备定理条目");
 
   // -------------------------------------------------------------- 手工新建
   await page.goto(`${base}/#/case-new-form`);
@@ -183,33 +191,25 @@ try {
   await page.fill('input[data-path="title"]', "手工建的用例");
   await page.fill('textarea[data-path="goal"]', "打开本地夹具页并提交表单");
   await page.fill('input[data-path="startUrl"]', "https://example.test/form");
+  if (!(await page.getByRole("button", { name: "检测页面" }).isDisabled())) problems.push("新建用例时「检测页面」应该是禁用的");
+  else ok("未保存时「检测页面」置灰");
 
-  // 未保存的用例没有 id：这个按钮必须置灰（旧代码会去请求 /api/cases/null/admit）。
-  if (!(await page.getByRole("button", { name: "检测页面" }).isDisabled())) {
-    problems.push("新建用例时「检测页面」应该是禁用的");
-  } else {
-    ok("未保存时「检测页面」置灰");
-  }
-
-  await page.locator(".disclosure > summary", { hasText: "更多（引擎与域名白名单）" }).click();
-  ok("引擎提示跟着引擎走",
-    (await page.locator(".disclosure-body .hint").first().textContent())?.trim().slice(0, 46));
-
-  await page.click("#tab-assertions");
   await page.selectOption(".recipe-add select", "text.contains");
-  await page.getByRole("button", { name: "+ 添加断言" }).click();
+  await page.getByRole("button", { name: "添加断言" }).click();
   await page.fill('input[data-path="assertions.final.text.contains.0"]', "已提交");
-  ok("新用例：断言角标更新", `"${await page.locator("#tab-assertions .tab-badge").textContent()}"`);
-  await shot("03-editor-new");
+  ok("新用例：断言计数更新", `"${await page.locator('.editor-nav-link[data-section="assertions"] .nav-count').textContent()}"`);
 
-  // ------------------------------------------------------ 校验：必填项标红
-  await page.click("#tab-basic");
+  // ------------------------------------------------------ 校验：字段标红 + 人话汇总
   await page.fill('input[data-path="title"]', "");
   await page.getByRole("button", { name: "创建", exact: true }).click();
   await page.waitForSelector(".field-error");
-  ok("校验失败：字段标红并自动切到所属标签",
-    `is-invalid=${await page.locator("input.is-invalid").count()} 当前标签="${(await page.locator(".tab.is-active").textContent())?.trim()}"`);
-  await shot("04-validation");
+  ok("校验失败：字段标红", `is-invalid=${await page.locator("input.is-invalid").count()}`);
+  const issue = (await page.locator(".error-slot .issue-field").first().textContent())?.trim();
+  if (issue !== "标题") problems.push(`错误汇总没有把路径译成人话（得到「${issue}」）`);
+  else ok("错误汇总用人话写字段名", issue);
+  await page.locator(".error-slot .issue-link").first().click();
+  ok("点汇总里的字段名跳过去", `焦点在 ${await page.evaluate(() => document.activeElement?.getAttribute("data-path"))}`);
+  await shot("03-validation");
 
   await page.fill('input[data-path="title"]', "手工建的用例");
   await page.getByRole("button", { name: "创建", exact: true }).click();
@@ -217,42 +217,41 @@ try {
   const manualId = page.url().split("/").pop();
   ok("手工创建成功", `#/case/${manualId}`);
 
-  await page.click("#tab-limits");
-  await page.waitForSelector('input[data-path="budget.maxSteps"]');
-  ok("预算与护栏档渲染", "maxSteps 在位");
-  await page.click("#tab-preview");
+  await page.getByRole("button", { name: "查看 YAML" }).click();
   const payload = await page.locator("pre.payload").textContent();
-  if (!payload?.includes("assertions")) problems.push("「保存内容」档没有渲染出即将提交的内容");
-  else ok("保存内容档渲染", `${payload.length} 字符`);
-  await shot("05-payload");
+  if (!payload?.includes("assertions")) problems.push("「保存内容」抽屉没有渲染出将提交的内容");
+  else ok("保存内容抽屉渲染", `${payload.length} 字符`);
+  await shot("04-drawer");
 
-  // ------------------------------------------------------------ 运行历史
+  // ------------------------------------------------------------ 运行列表
   await page.goto(`${base}/#/runs`);
   // 等列表**或**空状态出现：`GET /api/runs` 是异步拉的，直接数行会数到 0
-  // （这个脚本自己踩过一次，于是把「有 10 条历史」误报成「一条都没有」）。
   await page.waitForSelector(".list-table, .empty");
   const indexed = await page.locator(".list-table tbody tr").count();
   if (indexed === 0) {
     // 仓库里没有历史运行（全新 clone）时跳过结果页那几步，而不是判失败。
     console.log("SKIP 运行历史为空，跳过结果页走查（跑一次用例再回来）");
   } else {
-    ok("运行历史渲染", `行数=${indexed}`);
-    await shot("06-runs");
+    ok("运行列表渲染", `行数=${indexed} 筛选=${(await page.locator(".segmented-item").allTextContents()).join(" ")}`);
+    await shot("05-runs");
 
     await page.locator(".list-table tbody tr .row-title").first().click();
-    await page.waitForSelector(".verdict-card");
-    ok("结果页：判决卡 + 默认落档", `"${(await page.locator(".tab.is-active").textContent())?.trim()}"`);
-    ok("断言逐条渲染", `行数=${await page.locator("#panel-assertions tr").count()}`);
-
-    await page.click("#tab-trajectory");
-    await page.waitForSelector("#panel-trajectory tbody tr");
-    ok("轨迹档渲染", `步数=${await page.locator("#panel-trajectory tbody tr").count()}`);
-
-    await page.click("#tab-events");
-    await page.waitForSelector("#panel-events .events");
-    ok("事件档：空缓冲说明在位",
-      (await page.locator("#panel-events .events-placeholder").textContent())?.trim().slice(0, 24));
-    await shot("07-run");
+    // 等报告到：判决带落到三态之一（第一次轮询前是骨架，不是「运行中」）
+    await page.waitForSelector(".verdict-card.passed, .verdict-card.failed, .verdict-card.undecided");
+    ok("结果页：判决带", (await page.locator(".verdict-title").textContent())?.trim());
+    await page.waitForSelector(".trace-step, .trace .viewer-empty");
+    ok("轨迹：步骤时间线", `条目=${await page.locator(".trace-step").count()}`);
+    const images = page.locator(".viewer-image img");
+    if ((await images.count()) > 0) {
+      await images.first().evaluate((img) => img.decode());
+      const width = await images.first().evaluate((img) => img.naturalWidth);
+      if (width === 0) problems.push("轨迹截图没加载出来");
+      else ok("轨迹截图加载", `${width}px 宽`);
+    } else {
+      console.log("SKIP 这次运行没有截图（早于截图通路的运行），截图检查跳过");
+    }
+    ok("断言明细", `行数=${await page.locator("#run-assertions tr").count()}`);
+    await shot("06-run");
   }
 
   // -------------------------------------------------------------- 深色模式
@@ -260,21 +259,21 @@ try {
   await page.goto(`${base}/#/cases`);
   await page.waitForSelector(".list-table");
   ok("深色模式生效", `data-bs-theme=${await page.locator("html").getAttribute("data-bs-theme")}`);
-  await shot("08-cases-dark");
+  await shot("07-cases-dark");
   await page.goto(`${base}/#/case/${manualId}`);
-  await page.waitForSelector("#tab-assertions");
-  await page.click("#tab-assertions");
-  await shot("09-editor-dark");
+  await page.waitForSelector("#sec-assertions");
+  await shot("08-editor-dark");
 
   // -------------------------------------------------------- 删除手工用例
   await page.goto(`${base}/#/cases`);
   await page.waitForSelector(".list-table tbody tr");
   const before = await page.locator(".list-table tbody tr").count();
   const target = page.locator(".list-table tbody tr", { hasText: "手工建的用例" });
-  await target.locator("summary").click();
-  await target.getByRole("button", { name: "删除用例" }).click();
+  await target.locator(".menu > summary").click();
+  await target.getByRole("menuitem", { name: "删除用例" }).click();
+  await confirmDialog();
   await target.waitFor({ state: "detached" });
-  ok("删除用例（行内折叠里的破坏性操作）", `${before} -> ${await page.locator(".list-table tbody tr").count()}`);
+  ok("删除用例（菜单 + 确认框）", `${before} -> ${await page.locator(".list-table tbody tr").count()}，${await toastText()}`);
 } catch (error) {
   problems.push(`走查中断：${error.message}`);
 } finally {

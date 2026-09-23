@@ -32,6 +32,7 @@ import {
   createTypeSafeEngine,
 } from "../src/engine/typesafe.ts";
 import type { DecisionRequest, TextRequest } from "../src/engine/types.ts";
+import { failedCallUsage } from "../src/engine/types.ts";
 import type { TypeSafeOptions } from "../src/engine/typesafe.ts";
 
 // ---------------------------------------------------------------------------
@@ -162,9 +163,11 @@ function decisionRequest(): DecisionRequest {
       title: "Wikipedia, the free encyclopedia",
       text: "The Free Encyclopedia",
       textTruncated: false,
+      notices: [],
       elements: [{ index: "3", label: "Search", role: "combobox", value: "", operations: ["TYPE_TEXT"] }],
       recentActions: [{ action: "CLICK [12] link Wikipedia", kind: "click", text: null, pageChanged: true }],
       omittedActions: 0,
+      scroll: { y: 0, height: 780, viewportHeight: 780 },
     },
     questions: [
       {
@@ -319,6 +322,86 @@ test("请求形状：一次带全部问题、rules 与元素表原样下发、bu
   await engine.close();
 });
 
+test("页面提示只能拼进已有字段：置顶在 page.text，近期动作写进 action 串，不新增键", async (t) => {
+  const endpoint = await startEndpoint(t, () => ({ status: 200, json: okBody() }));
+  const engine = createTypeSafeEngine(engineOptions(endpoint.endpoint));
+  const request = decisionRequest();
+  request.state.notices = ["请输入SKU"];
+  request.state.recentActions = [
+    { action: "确定", kind: "click", text: null, pageChanged: false, notices: ["请输入SKU", "导入失败"] },
+  ];
+
+  await engine.decide(request, new AbortController().signal);
+
+  const state = (endpoint.requests[0]?.body as Record<string, any>)["state"];
+  assert.deepEqual(Object.keys(state.page).sort(), ["text", "title", "url"]);
+  assert.equal(
+    state.page.text,
+    "Notices currently shown on the page (toasts / alerts / validation; may include unrelated background notifications):\n- 请输入SKU\n\nPage text:\nThe Free Encyclopedia",
+  );
+  assert.deepEqual(state.recent_actions, [
+    { action: "确定 (notices visible afterwards, not necessarily caused by this action: 请输入SKU | 导入失败)", kind: "click", text: null, page_changed: false },
+  ]);
+  await engine.close();
+});
+
+test("视口外还有内容：位置拼在 page.text 前面，提示在它之前；上下不足 40px 不提", async (t) => {
+  const endpoint = await startEndpoint(t, () => ({ status: 200, json: okBody() }));
+  const engine = createTypeSafeEngine(engineOptions(endpoint.endpoint));
+
+  const below = decisionRequest();
+  below.state.scroll = { y: 0, height: 2400, viewportHeight: 780 };
+  await engine.decide(below, new AbortController().signal);
+
+  const both = decisionRequest();
+  both.state.notices = ["请输入SKU"];
+  both.state.scroll = { y: 600, height: 2400, viewportHeight: 780 };
+  await engine.decide(both, new AbortController().signal);
+
+  const margin = decisionRequest();
+  margin.state.scroll = { y: 0, height: 810, viewportHeight: 780 };
+  await engine.decide(margin, new AbortController().signal);
+
+  const texts = endpoint.requests.map((request) => (request.body as Record<string, any>)["state"].page.text);
+  assert.equal(
+    texts[0],
+    "Elements and page text cover only the visible viewport (780px of a 2400px-tall page). " +
+      "About 1620px of content is below (SCROLL_DOWN to see it).\n\nPage text:\nThe Free Encyclopedia",
+  );
+  assert.equal(
+    texts[1],
+    "Notices currently shown on the page (toasts / alerts / validation; may include unrelated background notifications):\n- 请输入SKU\n\n" +
+      "Elements and page text cover only the visible viewport (780px of a 2400px-tall page). " +
+      "About 600px of content is above (SCROLL_UP to see it). About 1020px of content is below (SCROLL_DOWN to see it)." +
+      "\n\nPage text:\nThe Free Encyclopedia",
+  );
+  assert.equal(texts[2], "The Free Encyclopedia", "30px 的余量多半是边距，不值得诱导一次滚动");
+  await engine.close();
+});
+
+test("读不到的跨域 iframe：在提示之后、视口位置之前说明一句，同样只拼进 page.text", async (t) => {
+  const endpoint = await startEndpoint(t, () => ({ status: 200, json: okBody() }));
+  const engine = createTypeSafeEngine(engineOptions(endpoint.endpoint));
+  const request = decisionRequest();
+  request.state.notices = ["请输入SKU"];
+  request.state.unreadableFrames = 1;
+  request.state.scroll = { y: 0, height: 2400, viewportHeight: 780 };
+
+  await engine.decide(request, new AbortController().signal);
+
+  const state = (endpoint.requests[0]?.body as Record<string, any>)["state"];
+  assert.deepEqual(Object.keys(state.page).sort(), ["text", "title", "url"]);
+  assert.equal(
+    state.page.text,
+    "Notices currently shown on the page (toasts / alerts / validation; may include unrelated background notifications):\n- 请输入SKU\n\n" +
+      "1 embedded cross-origin frame(s) on this page cannot be read: " +
+      "their contents are not in the element list or page text and cannot be operated.\n\n" +
+      "Elements and page text cover only the visible viewport (780px of a 2400px-tall page). " +
+      "About 1620px of content is below (SCROLL_DOWN to see it).\n\nPage text:\nThe Free Encyclopedia",
+  );
+  await engine.close();
+});
+
 test("detail 不能盖掉 code-owned 的 id / label", async (t) => {
   // 选择权必须只来自我们发出去的 id：页面里的文本若能覆盖 label（或 id），
   // 模型就有机会按站点内容而不是按索引做选择。
@@ -459,6 +542,8 @@ test("503 连续三次后失败：恰好尝试 MAX_ATTEMPTS 次，退避逐次�
   assert.ok(error instanceof EngineRequestError);
   assert.equal(endpoint.requests.length, MAX_ATTEMPTS);
   assert.match(error.message, /已重试 2 次/);
+  // 三次请求都真实发出、都可能计费：失败也要把用量交给调用方记账，否则重试失败是免费通道
+  assert.equal(failedCallUsage(error)?.usage.requests, MAX_ATTEMPTS);
   // 40 + 80 = 120ms：固定间隔会给出 80ms，退避没生效会给出 ~0ms。
   assert.ok(elapsed >= 110, `退避应逐次翻倍（40+80ms），实际 ${Math.round(elapsed)}ms`);
   await engine.close();
@@ -627,6 +712,7 @@ test("缺 probabilities 时报错，而不是合成 one-hot 让概率断言假�
   assert.match(error.message, /probabilities/);
   assert.match(error.message, /假通过/);
   assert.equal(endpoint.requests.length, 1, "响应不可用不该触发重试");
+  assert.equal(failedCallUsage(error)?.usage.requests, 1, "响应已计费：映射失败也要记账");
   await engine.close();
 });
 
@@ -848,6 +934,9 @@ test("未配置文本模型时 writeText 直接报错，绝不猜一个值", asy
   assert.equal(endpoint.requests.length, 0, "没有文本模型就不该有任何请求");
   assert.match(error.message, /未配置文本模型/);
   assert.match(error.message, /textModelApiKey/);
+  // 提示里的环境变量名必须是 config.ts 真正读的那个——照着一个不存在的名字去设，配置不会生效
+  assert.match(error.message, /\bTEXT_MODEL_API_KEY\b/);
+  assert.doesNotMatch(error.message, /JEVTEST_TEXT_MODEL/);
   await engine.close();
 });
 
@@ -913,10 +1002,13 @@ test("writeText 拒绝带前言的输出：模型输出直接进真实表单，�
     engineOptions(endpoint.endpoint, { text: { apiKey: "k", baseUrl: endpoint.endpoint, model: "m" } }),
   );
 
-  await assert.rejects(
-    () => engine.writeText(textRequest(), new AbortController().signal),
-    /不是合法 JSON/,
+  const error = await engine.writeText(textRequest(), new AbortController().signal).then(
+    () => null,
+    (reason: unknown) => reason,
   );
+  assert.ok(error instanceof EngineRequestError, "解析失败也保留「没有浏览器动作」这条信号");
+  assert.match(error.message, /不是合法 JSON/);
+  assert.equal(failedCallUsage(error)?.usage.requests, 1);
   await engine.close();
 });
 

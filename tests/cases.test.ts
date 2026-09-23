@@ -123,6 +123,8 @@ function indexEntry(overrides: Partial<RunIndexEntry> & { caseId: string }): Run
     passed: true,
     elapsedMs: 1000,
     steps: 3,
+    inputTokens: 1000,
+    outputTokens: 50,
     costUsd: null,
     ...overrides,
   };
@@ -375,6 +377,16 @@ describe("revision 从 revisions/ 目录推导，不维护计数器文件", () =
 // ---------------------------------------------------------------------------
 
 describe("乐观锁（expectedRevision）", () => {
+  it("expectedRevision 为 0（新建）而 id 已存在时拒绝，不静默覆盖", async (t) => {
+    const lib = await makeLibrary(t);
+    await lib.store.write(definition({ id: "flights", goal: "原来的" }));
+
+    const error = await rejection(lib.store.write(definition({ id: "flights", goal: "重名新建" }), { expectedRevision: 0 }));
+    assert.ok(error instanceof CaseConflict);
+    assert.match(error.message, /已存在/);
+    assert.ok(!(await readFile(caseFile(lib, "flights"), "utf8")).includes("重名新建"));
+  });
+
   it("expectedRevision 与磁盘一致时写入成功", async (t) => {
     const lib = await makeLibrary(t);
     const first = await lib.store.write(definition({ id: "flights" }));
@@ -647,6 +659,33 @@ describe("freeze 冻结用例到运行目录", () => {
     assert.ok((await readFile(destination, "utf8")).includes("改过之后冻结"));
   });
 
+  it("给了实际跑的 Case：冻结它而不是仓库当前版本，revision 按 digest 反查", async (t) => {
+    const lib = await makeLibrary(t);
+    await lib.store.write(definition({ id: "flights", goal: "入队时的目标" }));
+    // 入队时读到的那份（r1），随后用户在界面上改了用例（r2），运行才结束
+    const ran = CaseDefinitionSchema.parse((await lib.store.read("flights")).def);
+    await lib.store.write(definition({ id: "flights", goal: "运行途中改过" }), { expectedRevision: 1 });
+
+    const destination = join(lib.runsDir, "run-1", "case.yaml");
+    const frozen = await lib.store.freeze("flights", destination, ran);
+
+    const bytes = await readFile(destination, "utf8");
+    assert.ok(bytes.includes("入队时的目标"), `快照必须是实际跑的那份：\n${bytes}`);
+    assert.ok(!bytes.includes("运行途中改过"));
+    assert.equal(frozen.revision, 1, "revision 要指回实际跑的那一版，不是仓库此刻的 r2");
+    assert.equal(frozen.digest, caseDigest(ran));
+  });
+
+  it("实际跑的 Case 对不上任何已保存版本时 revision 记 0", async (t) => {
+    const lib = await makeLibrary(t);
+    await lib.store.write(definition({ id: "flights" }));
+    const ran = CaseDefinitionSchema.parse(definition({ id: "flights", goal: "从没保存过的内容" }));
+
+    const frozen = await lib.store.freeze("flights", join(lib.runsDir, "run-1", "case.yaml"), ran);
+    assert.equal(frozen.revision, 0);
+    assert.equal(frozen.digest, caseDigest(ran));
+  });
+
   it("冻结不存在的用例抛 CaseNotFound", async (t) => {
     const lib = await makeLibrary(t);
     await assert.rejects(
@@ -831,6 +870,14 @@ describe("list", () => {
     assert.equal(summary.digest, loaded.revision.digest);
     assert.equal(summary.savedAt, loaded.revision.savedAt);
     assert.equal(summary.lastRun, null); // 从没跑过
+    assert.equal(summary.startUrl, loaded.def.startUrl);
+    assert.equal(summary.authState, null); // 没选登录态是 null，不是缺字段
+  });
+
+  it("列表带出 authState：列表页据此在「运行」前提醒没带登录态", async (t) => {
+    const lib = await makeLibrary(t);
+    await lib.store.write({ ...definition({ id: "flights" }), authState: "admin-login" });
+    assert.equal((await lib.store.list())[0]?.authState, "admin-login");
   });
 
   it("非用例目录与坏用例被跳过，其余照常列出", async (t) => {

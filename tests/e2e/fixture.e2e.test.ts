@@ -33,6 +33,7 @@ import type { ScriptedStep } from "../../src/engine/scripted.ts";
 import type { DecisionEngine, DecisionRequest } from "../../src/engine/types.ts";
 import { readReport } from "../../src/core/report.ts";
 import { buildActionSpace } from "../../src/core/policy.ts";
+import { admit } from "../../src/browser/admission.ts";
 import type { ActionSpace } from "../../src/core/policy.ts";
 import type { CaseMode } from "../../src/schema/case.ts";
 import type { Operation } from "../../src/schema/events.ts";
@@ -87,8 +88,10 @@ function makeSettings(overrides: Partial<Settings>): Settings {
     // 无头：CI 与本地都不该弹出窗口。要看过程时把它设成 false 再单独跑这个文件。
     headless: true,
     tracing: true,
+    recordFrames: true,
     casesDir: "./cases",
     runsDir: "./runs",
+    authDir: "./auth",
     defaultEngine: "typesafe",
     ...overrides,
   };
@@ -102,6 +105,7 @@ before(async () => {
   const settings = makeSettings({
     casesDir: join(root, "cases"),
     runsDir: join(root, "runs"),
+    authDir: join(root, "auth"),
   });
 
   const engineFor = (): DecisionEngine => {
@@ -238,9 +242,16 @@ e2e("观测：按可访问名索引元素，几何上不可见的元素不进候
       false,
       `移出视口的按钮不该进候选集：${labels.join(" | ")}`,
     );
-    // 被浮层遮挡的按钮：它自己一切正常（尺寸、可见性、在视口内都成立），
-    // 只有 elementFromPoint 能发现中心点被盖住了 —— 所以它**在**候选集里。
-    assert.ok(labels.some((label) => label.includes("被浮层遮挡的按钮")));
+    // 一直被浮层盖住的按钮：它自己一切正常（尺寸、可见性、在视口内都成立），
+    // 只有 elementFromPoint 能发现中心点被盖住了。观测时就做这次命中测试，所以它**不在**
+    // 候选集里——否则模型会反复选中它、输入前被拦、再选它，每一轮都是一次模型调用。
+    assert.equal(
+      labels.includes("一直被浮层盖住的按钮"),
+      false,
+      `被盖住的按钮不该进候选集：${labels.join(" | ")}`,
+    );
+    // 浮层要等陷阱生效才出现（KEEP_TRAPS 下永不出现）：观测时它是可点的，必须在候选集里。
+    assert.ok(labels.includes("观测后会被浮层盖住的按钮"));
     // 禁用的选项不进候选集（原生 select 的 option 是一个个独立 target）。
     assert.equal(labels.some((label) => label.includes("扫描仪")), false);
   });
@@ -248,11 +259,14 @@ e2e("观测：按可访问名索引元素，几何上不可见的元素不进候
 
 e2e("遮挡命中测试：观测时可用、输入前被盖住的元素绝不被点击", async () => {
   await wiring.pool.withSession({ tracing: false }, async (session) => {
-    const page = await session.goto(`${fixture.url}/index.html${KEEP_TRAPS}`, {
+    const page = await session.goto(`${fixture.url}/index.html`, {
       waitUntil: "domcontentloaded",
     });
-    const target = page.actions.find((action) => action.label.includes("被浮层遮挡的按钮"));
-    assert.ok(target !== undefined);
+    const target = page.actions.find((action) => action.label.includes("观测后会被浮层盖住的按钮"));
+    assert.ok(target !== undefined, "这个按钮在陷阱生效前必须可点");
+
+    // 等浮层出现：制造「决策做出之后它被盖住了」这个时序
+    await new Promise((settle) => setTimeout(settle, TRAP_DELAY_MS + 300));
 
     // 这就是为什么点击必须用 page.mouse.click(x, y) 而不是 locator.click()：
     // locator 会替我们滚过去并点击，而此刻**不该继续点**（architecture §7.1）。
@@ -302,6 +316,21 @@ e2e("probe：准入统计能在真页面上采集（含原生 select 与复选�
   });
 });
 
+e2e("probe：一个同源 + 一个跨域 iframe，各计一次（子 frame 不能被数两次）", async () => {
+  await wiring.pool.withSession({ tracing: false }, async (session) => {
+    // waitUntil: load 会等子 frame 也加载完，frame 树在 probe 时已经稳定
+    await session.goto(`${fixture.url}/frames.html`, { waitUntil: "load" });
+    const stats = await session.probe();
+    assert.equal(stats.frames, 3, "主文档 + 两个 iframe");
+    assert.equal(stats.crossOriginFrames, 1);
+
+    // 落到判定上：跨域的报一次；同源的已经能遍历，不报
+    const caseDef = CaseDefinitionSchema.parse({ title: "frames", goal: "看一眼", startUrl: `${fixture.url}/frames.html` });
+    const report = admit(stats, caseDef);
+    assert.deepEqual(report.warnings, ["检测到 1 个跨域 iframe，其内部控件不可见"]);
+  });
+});
+
 e2e("导航在途时观测：等文档就绪，而不是把「读不到」判成运行故障", async () => {
   // 这条来自一次真跑：点「Search」提交后跳转到新文档，而动作之后紧接的那次观测
   // 正好落在「旧文档已卸载、新文档还没 body」的窗口里，snapshot.js 于是返回 null，
@@ -316,6 +345,234 @@ e2e("导航在途时观测：等文档就绪，而不是把「读不到」判成
     assert.match(page.url, /\/index\.html/, "观测到的应当是那份已提交的新文档");
     assert.ok(page.actions.length > 0, "等到文档就绪之后，元素表必须是有内容的");
     assert.ok(page.text.length > 0, "可见文本同样应当读到了");
+  });
+});
+
+e2e("打开起始页：等接口回来再做第一次观测，而不是只看到 DOMContentLoaded 时的外壳", async () => {
+  // 这条来自一次真跑：后台页面在 DOMContentLoaded 时只有导航栏，列表与「批量导入」
+  // 按钮是随后一次 XHR 拉回来的。第一次观测落在那之前，模型看不到能做的事，直接 BLOCKED。
+  await wiring.pool.withSession({ tracing: false }, async (session) => {
+    const page = await session.goto(`${fixture.url}/late.html`, { waitUntil: "domcontentloaded" });
+    const labels = page.actions.map((action) => action.label);
+    assert.ok(labels.includes("批量导入产品库"), `第一次观测就应当看到晚到的按钮，实际：${labels.join(" / ")}`);
+    assert.ok(labels.includes("导入设置"));
+  });
+});
+
+e2e("观测：没有 role、只靠 cursor:pointer 可点的菜单项也进候选集，且能被点中", async () => {
+  // 这条来自一次真跑：「批量导入产品库」的下拉已经展开，但菜单项是无语义的 <li>，
+  // 元素表里没有它们；模型读得到「导入eBay产品库」却无 id 可点，转而点了侧边栏的「eBay 导入」。
+  await wiring.pool.withSession({ tracing: false }, async (session) => {
+    const page = await session.goto(`${fixture.url}/pointer.html`, { waitUntil: "domcontentloaded" });
+    const labels = page.actions.map((action) => action.label);
+    const item = page.actions.find((action) => action.label === "导入eBay产品库");
+    assert.ok(item !== undefined, `菜单项应当进候选集：${labels.join(" | ")}`);
+    assert.equal(item.role, "button", "无语义可点元素按 button 记，只读模式才会保守地剔除它");
+    assert.ok(labels.includes("导入亚马逊产品库"));
+    // cursor: no-drop 的禁用项不是 pointer，不进
+    assert.equal(labels.includes("导入SHEIN产品库"), false, labels.join(" | "));
+    // 每个菜单项只算一次：<span class="title"> 继承了 pointer，但它不是最外层
+    assert.equal(labels.filter((label) => label === "导入eBay产品库").length, 1, labels.join(" | "));
+    // 与语义候选重叠的 pointer 元素不重复收：label 包着复选框、卡片里有链接
+    assert.equal(labels.filter((label) => label === "全选").length, 1, labels.join(" | "));
+    assert.equal(labels.some((label) => label.includes("卡片正文")), false, labels.join(" | "));
+
+    // 点下去必须真的触发委托在 <ul> 上的处理器：页面把结果写进可见文本
+    await session.act(item, page);
+    const after = await session.observe();
+    assert.match(after.text, /已导入：ebay/);
+  });
+});
+
+e2e("观测：只露出一截的按钮按露出部分的中心进候选、能点中；完全在视口外的仍然不收", async () => {
+  // 这条来自一次真跑：类目弹层的「确定」只露出几像素，中心点落在 iframe 视口外，整个不进候选集。
+  // 模型不知道还有这一步，选完类目直接点了顶栏「保存」，弹层关掉、选择没提交。
+  await wiring.pool.withSession({ tracing: false }, async (session) => {
+    const page = await session.goto(`${fixture.url}/clipped.html`, { waitUntil: "domcontentloaded" });
+    const labels = page.actions.map((action) => action.label);
+    const confirm = page.actions.find((action) => action.label === "确定");
+    assert.ok(confirm !== undefined, `只露出一截的按钮应当进候选集：${labels.join(" | ")}`);
+    assert.equal(labels.includes("取消"), false, `完全在视口外的按钮不该进候选集：${labels.join(" | ")}`);
+
+    // 执行前的解析与观测同一条标准：点露出的那截，而不是报 offscreen
+    await session.act(confirm, page);
+    const after = await session.observe();
+    assert.match(after.text, /已确认/);
+  });
+});
+
+e2e("观测：页面提示（toast / alert）单独收进 notices，常驻公告、读屏区域、已关的 toast 不收", async () => {
+  // 这条来自一次真跑：「请输入SKU」的 toast 混在几千字正文里、与同名占位符分不开，模型连点了四次「确定」。
+  await wiring.pool.withSession({ tracing: false }, async (session) => {
+    const page = await session.goto(`${fixture.url}/notices.html`, { waitUntil: "domcontentloaded" });
+    assert.deepEqual(page.notices, ["请输入SKU", "SKU 不能为空", "导入失败"]);
+  });
+});
+
+e2e("观测：无名复选框的 label 带上所在表格行，表头全选框与数据行分得开", async () => {
+  // 这条来自一次真跑：目标写明「勾前 2 个、不要点表头全选框」，而元素表里它们全叫 `checkbox`，
+  // 模型第一步就点了全选（一次选中 50 项）。
+  await wiring.pool.withSession({ tracing: false }, async (session) => {
+    const page = await session.goto(`${fixture.url}/table.html`, { waitUntil: "domcontentloaded" });
+    const labels = page.actions.filter((action) => action.role === "checkbox").map((action) => action.label);
+    assert.deepEqual(labels, [
+      "checkbox · header row · 标题 物品单价",
+      "checkbox · row 1 · Remote Control Car Toy SG$8.82",
+      "checkbox · row 2 · LELEMAO Large Rechargeable RC Off-road Car SG$26.10",
+      "checkbox · row 3 · Hot Wheels Basic Single Car SG$3.50",
+      "checkbox · header row · 账号",
+      "checkbox · row 1 · 主账号",
+      "checkbox · row 2 · 子账号",
+      "保存图片",
+      "checkbox",
+    ]);
+  });
+});
+
+e2e("观测：名字认不出是哪一个的候选（空 / 只是 placeholder / 重名），label 带上它所在那一组的文字", async () => {
+  // 这条来自一次真跑：「库存SKU:」与输入框并列、不写 for=，元素表里它只叫「请输入」，
+  // 文本模型不知道这是哪个字段，回了 text: null，整次运行就此终止。
+  // 几组「是 / 否」、一列「编辑」是同一类问题；名字够用的（aria-label、唯一的「复制」）原样不动。
+  // 没有 label 的 <select> 不拿选项文字当名字：真跑里那段两千多字的名字跟着每个选项重复，
+  // 决策请求超出了服务端的上限。
+  await wiring.pool.withSession({ tracing: false }, async (session) => {
+    const page = await session.goto(`${fixture.url}/form-items.html`, { waitUntil: "domcontentloaded" });
+    const labels = page.actions.filter((action) => action.node !== undefined && !action.label.startsWith("Open "))
+      .map((action) => action.label);
+    assert.deepEqual(labels, [
+      "请输入 · 库存SKU:",
+      "combobox → .3456 »",
+      "combobox → 007 »",
+      "combobox → 11",
+      "combobox → 0509",
+      "combobox → 12 »",
+      "请输入 · 产品备注:",
+      "是 · 组合产品: 是 否",
+      "否 · 组合产品: 是 否",
+      "是 · 多属性: 是 否",
+      "否 · 多属性: 是 否",
+      "重量（克）",
+      "编辑 · eBay 模板 A 编辑 复制",
+      "复制",
+      "编辑 · eBay 模板 B 编辑",
+      "搜索",
+    ]);
+  });
+});
+
+e2e("动作之后：等动作引出的接口回来再观测，弹窗里晚到的选项不被错过", async () => {
+  // 这条来自一次真跑：点「导入eBay产品库」后弹窗外壳立刻出现，SKU 选项等接口回来才渲染。
+  // 观测落在两者之间，模型只看得到「确定」，于是在选 SKU 方式之前就点了它。
+  await wiring.pool.withSession({ tracing: false }, async (session) => {
+    const page = await session.goto(`${fixture.url}/dialog.html`, { waitUntil: "domcontentloaded" });
+    const open = page.actions.find((action) => action.label === "导入eBay产品库");
+    assert.ok(open !== undefined);
+    await session.act(open, page);
+    const after = await session.observe();
+    const labels = after.actions.map((action) => action.label);
+    assert.ok(labels.includes("确定"), labels.join(" | "));
+    assert.ok(labels.includes("自动以ListingID或ASIN为SKU"), `弹窗内容应当已经到了：${labels.join(" | ")}`);
+  });
+});
+
+e2e("动作之后：动作引出的请求迟迟不回时按上限放行，不挂住运行", async () => {
+  await wiring.pool.withSession({ tracing: false }, async (session) => {
+    const page = await session.goto(`${fixture.url}/dialog.html`, { waitUntil: "domcontentloaded" });
+    const slow = page.actions.find((action) => action.label === "刷新统计");
+    assert.ok(slow !== undefined);
+    const started = Date.now();
+    await session.act(slow, page);
+    const elapsed = Date.now() - started;
+    // 接口 5s 才回，上限 3s：等到上限就放行（留出 evaluate 往返的余量）
+    assert.ok(elapsed < 4_500, `act 用了 ${elapsed}ms，应当在上限附近放行`);
+    const after = await session.observe();
+    assert.equal(after.text.includes("统计已刷新"), false, "这时接口确实还没回来");
+  });
+});
+
+e2e("观测：同源 iframe 的元素并进元素表（f1:e7、坐标在顶层），跨域 iframe 计入 unreadableFrames", async () => {
+  await wiring.pool.withSession({ tracing: false }, async (session) => {
+    const page = await session.goto(`${fixture.url}/frames.html`, { waitUntil: "load" });
+    assert.equal(page.unreadableFrames, 1, "跨域 iframe 200x100 在视口里：看得见、读不到");
+    const inFrame = page.actions.filter((action) => /^f\d+:e\d+$/.test(action.id));
+    const home = inFrame.find((action) => action.label === "首页");
+    assert.ok(home !== undefined, `同源 iframe 里的面包屑链接应当进元素表：${page.actions.map((a) => a.id + " " + a.label).join(" | ")}`);
+    assert.ok((home.node ?? 0) >= 1_000_000, "子 frame 的节点身份编码过，不与主文档撞号");
+    assert.ok((home.rect?.y ?? 0) > 0, "几何换算到顶层视口");
+    // 跨域 iframe 里同名的链接读不到：同一个 detail.html，只进来一份
+    assert.equal(page.actions.filter((action) => action.label === "首页").length, 1);
+    // 主文档没有文字：iframe 那段打头，前面不留空行
+    assert.match(page.text, /^\[iframe f\d+: [^\]]*设备详情\]\n首页/);
+  });
+});
+
+e2e("同源 iframe：弹窗里晚到的 iframe 表单能填、能选、能在 iframe 里滚、能点保存；被父文档浮层盖住的不进候选", async () => {
+  // 这条来自一次真跑：「添加产品」的表单在弹窗的 iframe 里，主文档被遮罩盖住，
+  // 快照只看主文档，模型面前只剩空壳，第 3 步就回了 BLOCKED。
+  await wiring.pool.withSession({ tracing: false }, async (session) => {
+    const page = await session.goto(`${fixture.url}/iframe-modal.html`, { waitUntil: "domcontentloaded" });
+    const add = page.actions.find((action) => action.label === "+ 添加产品");
+    assert.ok(add !== undefined);
+    await session.act(add, page);
+
+    // iframe 文档 600ms 才回：动作之后的等待要把它算进去，这一次观测就该看到表单
+    let now = await session.observe();
+    const labels = (): string => now.actions.map((action) => `${action.id} ${action.label}`).join(" | ");
+    const title = now.actions.find((action) => action.kind === "fill" && action.label === "模板标题");
+    assert.ok(title !== undefined, `iframe 里的输入框应当进元素表：${labels()}`);
+    assert.match(title.id, /^f\d+:e\d+$/);
+    assert.equal(now.actions.some((action) => action.label === "+ 添加产品"), false, "主文档被遮罩盖住");
+    assert.equal(now.actions.some((action) => action.label === "被盖住的按钮"), false, `父文档的浮层盖住了它：${labels()}`);
+
+    await session.act(title, now, "测试模板");
+    now = await session.observe();
+    const uk = now.actions.find((action) => action.kind === "select" && action.label.endsWith("eBay UK"));
+    assert.ok(uk !== undefined, labels());
+    await session.act(uk, now);
+    now = await session.observe();
+    assert.equal(now.actions.find((action) => action.kind === "fill" && action.label === "模板标题")?.value, "测试模板");
+
+    // 滚轮落点在 iframe 上：滚动动作取自 iframe（主文档本身并不能滚）
+    assert.equal(now.actions.some((action) => action.label === "保存模板"), false, "保存按钮在 iframe 首屏之下");
+    const down = now.actions.find((action) => action.id === "scroll_down");
+    assert.ok(down !== undefined, `iframe 能往下滚：${labels()}`);
+    await session.act(down, now);
+    now = await session.observe();
+    const save = now.actions.find((action) => action.label === "保存模板");
+    assert.ok(save !== undefined, `滚过之后保存按钮应当露出来：${labels()}`);
+    await session.act(save, now);
+    now = await session.observe();
+    assert.match(now.text, /已保存：测试模板 · eBay UK/);
+  });
+});
+
+e2e("动作之后：iframe 文档超过 3s 才回、回来后还白屏一阵，也等它加载完再观测", async () => {
+  // 这条来自一次真跑：iframe 文档 2.2s 才回来，之后还要拉样式与脚本；3s 的安静上限到点时 iframe 仍是白屏，
+  // 模型对着空壳回了 BLOCKED。
+  const src = encodeURIComponent("iframe-form.html?delay=3500&ready=800");
+  await wiring.pool.withSession({ tracing: false }, async (session) => {
+    const page = await session.goto(`${fixture.url}/iframe-modal.html?src=${src}`, { waitUntil: "domcontentloaded" });
+    const add = page.actions.find((action) => action.label === "+ 添加产品");
+    assert.ok(add !== undefined);
+    await session.act(add, page);
+    const after = await session.observe();
+    const labels = after.actions.map((action) => action.label).join(" | ");
+    assert.ok(after.actions.some((action) => action.label === "模板标题"), `iframe 表单应当已经显示出来：${labels}`);
+    assert.equal(after.blankFrames, undefined);
+  });
+});
+
+e2e("观测：看得见却一个可操作元素都没有的大 iframe 记进 blankFrames（键带文档身份）", async () => {
+  const src = encodeURIComponent("about:blank");
+  await wiring.pool.withSession({ tracing: false }, async (session) => {
+    const page = await session.goto(`${fixture.url}/iframe-modal.html?src=${src}`, { waitUntil: "domcontentloaded" });
+    assert.equal(page.blankFrames, undefined, "弹窗没打开时 iframe 看不见，不算白屏");
+    const add = page.actions.find((action) => action.label === "+ 添加产品");
+    assert.ok(add !== undefined);
+    await session.act(add, page);
+    const after = await session.observe();
+    assert.equal(after.blankFrames?.length, 1);
+    assert.match(after.blankFrames[0] ?? "", /^f\d+@\d+(\.\d+)?$/);
   });
 });
 
