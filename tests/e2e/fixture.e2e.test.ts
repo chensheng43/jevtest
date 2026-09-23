@@ -33,6 +33,7 @@ import type { ScriptedStep } from "../../src/engine/scripted.ts";
 import type { DecisionEngine, DecisionRequest } from "../../src/engine/types.ts";
 import { readReport } from "../../src/core/report.ts";
 import { buildActionSpace } from "../../src/core/policy.ts";
+import { admit } from "../../src/browser/admission.ts";
 import type { ActionSpace } from "../../src/core/policy.ts";
 import type { CaseMode } from "../../src/schema/case.ts";
 import type { Operation } from "../../src/schema/events.ts";
@@ -299,6 +300,24 @@ e2e("probe：准入统计能在真页面上采集（含原生 select 与复选�
     assert.equal(stats.fileInputs, 0);
     assert.equal(stats.passwordFields, 0, "夹具刻意不放密码框：否则准入会带警告");
     assert.ok(stats.interactiveElements > 3, `可交互元素过少：${stats.interactiveElements}`);
+  });
+});
+
+e2e("probe：一个同源 + 一个跨域 iframe，各计一次（子 frame 不能被数两次）", async () => {
+  await wiring.pool.withSession({ tracing: false }, async (session) => {
+    // waitUntil: load 会等子 frame 也加载完，frame 树在 probe 时已经稳定
+    await session.goto(`${fixture.url}/frames.html`, { waitUntil: "load" });
+    const stats = await session.probe();
+    assert.equal(stats.frames, 3, "主文档 + 两个 iframe");
+    assert.equal(stats.crossOriginFrames, 1);
+
+    // 落到判定上：只有一个同源 iframe，不能多报
+    const caseDef = CaseDefinitionSchema.parse({ title: "frames", goal: "看一眼", startUrl: `${fixture.url}/frames.html` });
+    const report = admit(stats, caseDef);
+    assert.ok(
+      report.warnings.some((w) => w.includes("检测到 1 个同源 iframe")),
+      `应当恰好报 1 个同源 iframe，实际：${report.warnings.join(" / ")}`,
+    );
   });
 });
 

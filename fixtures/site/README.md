@@ -34,6 +34,7 @@
 | `style.css` | 含两条功能性样式：浮层必须盖住按钮中心点、离屏按钮必须在首屏之外 |
 | `app.js` | 动态渲染（rAF）、自动补全候选（setTimeout）、陷阱定时器、`window.__fixture` 状态 |
 | `detail.js` | 详情页填充与返回 |
+| `frames.html` | 一个同源 + 一个跨域 iframe（跨域靠换成 `localhost` 访问同一服务），给准入探测的 frame 计数用 |
 
 配套的静态服务在 `tests/e2e/fixture-server.ts`，导出
 `startFixtureServer(): Promise<{ url: string; close(): Promise<void> }>`，

@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>iframe 夹具</title>
+</head>
+<body>
+  <!-- 准入探测的 frame 计数用：一个同源 iframe + 一个跨域 iframe。 -->
+  <iframe id="same" title="同源" src="detail.html?id=1" width="200" height="100"></iframe>
+  <script>
+    // 跨域：同一个夹具服务，换成 localhost 访问（127.0.0.1 与 localhost 是不同 origin）。
+    // 端口是测试时动态分配的，只能在运行时拼出来。
+    const cross = document.createElement("iframe");
+    cross.id = "cross";
+    cross.title = "跨域";
+    cross.width = "200";
+    cross.height = "100";
+    cross.src = `${location.protocol}//localhost:${location.port}/detail.html?id=2`;
+    document.body.appendChild(cross);
+  </script>
+</body>
+</html>

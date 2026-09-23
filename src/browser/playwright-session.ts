@@ -805,11 +805,12 @@ export function createPlaywrightSession(options: PlaywrightSessionOptions): Sess
     // 主文档永远是 1，所以「有 iframe」等价于 `frames > 1`）。
     // 两个能自圆其说的口径里选了这个，是因为它与文档、与 e2e 用例一致；
     // 代价是判定侧必须记着减掉主文档那一个，见 admission.ts 的 same-origin-frames。
-    let frames = allFrames.length;
+    // 注意 allFrames 本身就含主文档：循环里不要再给 frames 计数，否则每个子 frame 被数两次，
+    // 一个跨域 iframe 就会被误报成「检测到 1 个同源 iframe」。
+    const frames = allFrames.length;
     let crossOriginFrames = 0;
     for (const frame of allFrames) {
       if (frame === mainFrame) continue;
-      frames++;
       const origin = originOf(frame.url());
       if (origin !== null && origin !== mainOrigin) {
         crossOriginFrames++; // page.frames() 能准确枚举跨域 frame，纯 JS 探测做不到
