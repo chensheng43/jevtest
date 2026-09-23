@@ -884,6 +884,7 @@ function createCaseStoreServices(settings: Settings, store: CaseStore): Services
     events: {
       sink: { emit: () => {} },
       log: notStarted("事件日志"),
+      peek: () => null,
       bus: { emit: () => {}, subscribe: notStarted("事件日志") },
       retire: () => {},
     },

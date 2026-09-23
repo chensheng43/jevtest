@@ -10,7 +10,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import type { RunEvent } from "../src/schema/events.ts";
-import { createEventLog, createGlobalBus } from "../src/web/events.ts";
+import { MAX_RETAINED_LOGS, createEventLog, createEventRouter, createGlobalBus } from "../src/web/events.ts";
 
 const RUN = "run-1";
 
@@ -145,4 +145,36 @@ test("全局总线跨运行，不校验 runId", () => {
     sub.replay.map((e) => e.runId),
     ["a", "b"],
   );
+});
+
+test("路由器：还没结束的运行的日志不会因为别的运行结束而被淘汰", () => {
+  const router = createEventRouter();
+  // 一次入队远超保留上限的运行：全部先发 run.queued（与 runner 的行为一致）
+  const total = MAX_RETAINED_LOGS + 50;
+  for (let i = 0; i < total; i++) {
+    router.sink.emit({ type: "run.queued", runId: `run-${i}`, caseId: "c" });
+  }
+  // 第一个跑完 -> retire。此前实现会从 Map 头部删掉 50 个还在排队的日志
+  router.retire("run-0");
+
+  for (let i = 1; i < total; i++) {
+    assert.notEqual(router.peek(`run-${i}`), null, `run-${i} 还没结束，它的日志不能丢`);
+  }
+});
+
+test("路由器：已结束的运行按保留上限淘汰最早完成的", () => {
+  const router = createEventRouter();
+  const total = MAX_RETAINED_LOGS + 5;
+  for (let i = 0; i < total; i++) {
+    router.sink.emit({ type: "run.queued", runId: `run-${i}`, caseId: "c" });
+    router.retire(`run-${i}`);
+  }
+  assert.equal(router.peek("run-0"), null, "最早完成的先被淘汰");
+  assert.notEqual(router.peek(`run-${total - 1}`), null);
+});
+
+test("路由器：peek 查不到时不创建日志", () => {
+  const router = createEventRouter();
+  assert.equal(router.peek("never-ran"), null);
+  assert.equal(router.peek("never-ran"), null, "第二次查仍然是 null：第一次没有顺手建出一个空日志");
 });

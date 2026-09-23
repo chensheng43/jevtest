@@ -73,7 +73,7 @@ export function createGlobalBus(): GlobalBus {
 }
 
 /**
- * 保留多少个运行的事件日志。
+ * 保留多少个**已结束**运行的事件日志（未结束的运行一律保留，不计入这个上限）。
  *
  * 已结束的运行**不能立刻丢日志**：前端刷新页面时会从 `seq = 0` 重放，
  * 那时运行早就结束了。但也不能无限留——每个日志最多 500 条事件。
@@ -94,25 +94,37 @@ export const MAX_RETAINED_LOGS = 100;
 export interface EventRouter {
   /** 传给 `RunnerDeps.events` 的那个 sink */
   sink: EventSink;
-  /** 取（或按需创建）某个运行的事件日志。**未创建时返回一个空日志**，供不存在的事件端点用 */
+  /** 取（或按需创建）某个运行的事件日志。只给写入方（sink）用 */
   log(runId: string): EventLog;
+  /**
+   * 只读查找，**不创建**。读端点必须用它：用 log() 的话，每个查询一个未知 runId
+   * （服务重启前的历史运行、手输的 id）都会建出一个永远不会被 retire 的空日志。
+   */
+  peek(runId: string): EventLog | null;
   bus: GlobalBus;
   /** 运行结束、报告已落盘后调用，按 MAX_RETAINED_LOGS 淘汰最旧的日志 */
   retire(runId: string): void;
 }
 
 export function createEventRouter(): EventRouter {
-  /** 插入顺序即「创建或完成的先后」——retire 会把该 run 重新插到末尾，淘汰时从头丢。 */
-  const logs = new Map<string, EventLog>();
+  /**
+   * 未结束的运行。**从不淘汰**：一次入队 150 个用例时，排在后面的还没跑、却已经
+   * 有 run.queued 事件；把它们和已结束的放进同一个 LRU，第一批跑完时就会把它们挤掉，
+   * 之后 seq 从 1 重来，前端拿着旧的 since 会一直看不到进度。
+   */
+  const live = new Map<string, EventLog>();
+  /** 已结束（retire 过）的运行。插入顺序即完成先后，超过上限从头丢 */
+  const retired = new Map<string, EventLog>();
   const bus = createGlobalBus();
 
+  const peek = (runId: string): EventLog | null => live.get(runId) ?? retired.get(runId) ?? null;
+
   const log = (runId: string): EventLog => {
-    let existing = logs.get(runId);
-    if (existing === undefined) {
-      existing = createEventLog(runId);
-      logs.set(runId, existing);
-    }
-    return existing;
+    const existing = peek(runId);
+    if (existing !== null) return existing;
+    const created = createEventLog(runId);
+    live.set(runId, created);
+    return created;
   };
 
   return {
@@ -125,17 +137,17 @@ export function createEventRouter(): EventRouter {
       },
     },
     log,
+    peek,
     bus,
     retire: (runId) => {
-      const existing = logs.get(runId);
+      const existing = live.get(runId);
       if (existing === undefined) return;
-      // 重新插到 Map 末尾 = 标记为「最近完成」，淘汰时先丢最早的那批。
-      logs.delete(runId);
-      logs.set(runId, existing);
-      while (logs.size > MAX_RETAINED_LOGS) {
-        const oldest = logs.keys().next().value;
+      live.delete(runId);
+      retired.set(runId, existing);
+      while (retired.size > MAX_RETAINED_LOGS) {
+        const oldest = retired.keys().next().value;
         if (oldest === undefined || oldest === runId) break;
-        logs.delete(oldest);
+        retired.delete(oldest);
       }
     },
   };

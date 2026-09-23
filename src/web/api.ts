@@ -472,7 +472,9 @@ async function handleRuns(
     if (!Number.isFinite(since) || since < 0) {
       return fail(400, `since 必须是非负数字（收到 ${rawSince}）`);
     }
-    const log = services.events.log(runId);
+    // peek 而不是 log：查询一个不存在的运行不该在内存里留下一个永远不会淘汰的空日志
+    const log = services.events.peek(runId);
+    if (log === null) return ok([]);
     const sub = log.subscribe(Math.floor(since));
     const events: SeqEvent[] = [...sub.replay];
     if (events.length === 0) {
