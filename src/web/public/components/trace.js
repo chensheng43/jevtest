@@ -161,11 +161,29 @@ export function createTrace(runId) {
     ]);
   }
 
+  /** DONE / BLOCKED 那次决策：它不是一步，只在「结束」里看得到它有多大把握 */
+  function terminalText(terminal) {
+    const head = el("strong", { text: operationLabel(terminal.operation) });
+    if (terminal.distribution === "degenerate") {
+      return el("span", {}, [head, el("span", { class: "hint-inline", text: "这个引擎给不出真实分布，没有概率可看。" })]);
+    }
+    const others = Object.entries(terminal.operationProbabilities)
+      .filter(([operation]) => operation !== terminal.operation)
+      .sort(([, a], [, b]) => b - a)
+      .map(([operation, value]) => `${operationLabel(operation)} ${probability(value)}`);
+    return el("span", {}, [
+      head,
+      el("span", { class: "mono", text: ` 操作 ${probability(terminal.operationProbability)}，置信 ${probability(terminal.confidence)}` }),
+      others.length > 0 ? el("div", { class: "hint-inline", text: `其余候选：${others.join(" / ")}` }) : null,
+    ].filter(Boolean));
+  }
+
   function details(item) {
     if (item.final) {
       return facts([
         ["结束方式", statusLabel(item.status ?? "running")],
         item.failureReason ? ["原因", item.failureReason] : null,
+        item.terminal ? ["模型的决定", terminalText(item.terminal)] : null,
         ["最终地址", el("span", { class: "mono break", text: item.url ?? "未观测到" })],
       ]);
     }
@@ -221,6 +239,7 @@ export function createTrace(runId) {
       status: report.status,
       verdict: verdictClass(report.status, report.passed),
       failureReason: report.failureReason,
+      terminal: report.terminalDecision ?? null,
     });
     // 一步都没走且没有最终帧：只留「结束」一项也没有信息量，交给空状态说明
     if (report.steps.length === 0 && (report.finalFrame ?? null) === null && report.finalUrl === null) items = [];

@@ -483,6 +483,8 @@ const INDEX_ENTRY: RunIndexEntry = {
   passed: true,
   elapsedMs: 4000,
   steps: 2,
+  inputTokens: 33859,
+  outputTokens: 2663,
   costUsd: 0.0012,
 };
 

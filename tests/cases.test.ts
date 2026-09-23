@@ -123,6 +123,8 @@ function indexEntry(overrides: Partial<RunIndexEntry> & { caseId: string }): Run
     passed: true,
     elapsedMs: 1000,
     steps: 3,
+    inputTokens: 1000,
+    outputTokens: 50,
     costUsd: null,
     ...overrides,
   };

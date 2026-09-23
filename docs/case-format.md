@@ -278,7 +278,7 @@ assertions:
 | --- | --- |
 | `queued` | 已入队 |
 | `running` | 执行中 |
-| `done` | 模型选择了 DONE，且页面在决策后未变化 |
+| `done` | 模型选择了 DONE（概率须过半，见 decisions.md D25），且页面在决策后未变化 |
 | `blocked` | 模型选择了 BLOCKED（概率须过半，见 decisions.md D20），或连续多步无进展，或连续 3 次决策在执行前被丢弃（目标被遮挡 / 页面已变，见 D21） |
 | `budget_exceeded` | 撞到预算上限 |
 | `guardrail_blocked` | 被安全护栏拦截 |

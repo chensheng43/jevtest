@@ -167,6 +167,7 @@ function decisionRequest(): DecisionRequest {
       elements: [{ index: "3", label: "Search", role: "combobox", value: "", operations: ["TYPE_TEXT"] }],
       recentActions: [{ action: "CLICK [12] link Wikipedia", kind: "click", text: null, pageChanged: true }],
       omittedActions: 0,
+      scroll: { y: 0, height: 780, viewportHeight: 780 },
     },
     questions: [
       {
@@ -336,11 +337,68 @@ test("页面提示只能拼进已有字段：置顶在 page.text，近期动作�
   assert.deepEqual(Object.keys(state.page).sort(), ["text", "title", "url"]);
   assert.equal(
     state.page.text,
-    "Notices currently shown on the page (toasts / alerts / validation):\n- 请输入SKU\n\nPage text:\nThe Free Encyclopedia",
+    "Notices currently shown on the page (toasts / alerts / validation; may include unrelated background notifications):\n- 请输入SKU\n\nPage text:\nThe Free Encyclopedia",
   );
   assert.deepEqual(state.recent_actions, [
-    { action: "确定 (afterwards the page showed: 请输入SKU | 导入失败)", kind: "click", text: null, page_changed: false },
+    { action: "确定 (notices visible afterwards, not necessarily caused by this action: 请输入SKU | 导入失败)", kind: "click", text: null, page_changed: false },
   ]);
+  await engine.close();
+});
+
+test("视口外还有内容：位置拼在 page.text 前面，提示在它之前；上下不足 40px 不提", async (t) => {
+  const endpoint = await startEndpoint(t, () => ({ status: 200, json: okBody() }));
+  const engine = createTypeSafeEngine(engineOptions(endpoint.endpoint));
+
+  const below = decisionRequest();
+  below.state.scroll = { y: 0, height: 2400, viewportHeight: 780 };
+  await engine.decide(below, new AbortController().signal);
+
+  const both = decisionRequest();
+  both.state.notices = ["请输入SKU"];
+  both.state.scroll = { y: 600, height: 2400, viewportHeight: 780 };
+  await engine.decide(both, new AbortController().signal);
+
+  const margin = decisionRequest();
+  margin.state.scroll = { y: 0, height: 810, viewportHeight: 780 };
+  await engine.decide(margin, new AbortController().signal);
+
+  const texts = endpoint.requests.map((request) => (request.body as Record<string, any>)["state"].page.text);
+  assert.equal(
+    texts[0],
+    "Elements and page text cover only the visible viewport (780px of a 2400px-tall page). " +
+      "About 1620px of content is below (SCROLL_DOWN to see it).\n\nPage text:\nThe Free Encyclopedia",
+  );
+  assert.equal(
+    texts[1],
+    "Notices currently shown on the page (toasts / alerts / validation; may include unrelated background notifications):\n- 请输入SKU\n\n" +
+      "Elements and page text cover only the visible viewport (780px of a 2400px-tall page). " +
+      "About 600px of content is above (SCROLL_UP to see it). About 1020px of content is below (SCROLL_DOWN to see it)." +
+      "\n\nPage text:\nThe Free Encyclopedia",
+  );
+  assert.equal(texts[2], "The Free Encyclopedia", "30px 的余量多半是边距，不值得诱导一次滚动");
+  await engine.close();
+});
+
+test("读不到的跨域 iframe：在提示之后、视口位置之前说明一句，同样只拼进 page.text", async (t) => {
+  const endpoint = await startEndpoint(t, () => ({ status: 200, json: okBody() }));
+  const engine = createTypeSafeEngine(engineOptions(endpoint.endpoint));
+  const request = decisionRequest();
+  request.state.notices = ["请输入SKU"];
+  request.state.unreadableFrames = 1;
+  request.state.scroll = { y: 0, height: 2400, viewportHeight: 780 };
+
+  await engine.decide(request, new AbortController().signal);
+
+  const state = (endpoint.requests[0]?.body as Record<string, any>)["state"];
+  assert.deepEqual(Object.keys(state.page).sort(), ["text", "title", "url"]);
+  assert.equal(
+    state.page.text,
+    "Notices currently shown on the page (toasts / alerts / validation; may include unrelated background notifications):\n- 请输入SKU\n\n" +
+      "1 embedded cross-origin frame(s) on this page cannot be read: " +
+      "their contents are not in the element list or page text and cannot be operated.\n\n" +
+      "Elements and page text cover only the visible viewport (780px of a 2400px-tall page). " +
+      "About 1620px of content is below (SCROLL_DOWN to see it).\n\nPage text:\nThe Free Encyclopedia",
+  );
   await engine.close();
 });
 

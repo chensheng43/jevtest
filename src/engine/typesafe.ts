@@ -257,7 +257,7 @@ function buildDecisionBody(model: string, req: DecisionRequest): Record<string, 
       page: {
         url: req.state.url,
         title: req.state.title,
-        text: withNotices(req.state.notices, trimPageText(req.state.text, req.budget)),
+        text: withPreamble(req.state, trimPageText(req.state.text, req.budget)),
       },
       // 元素表原样透传：它的字段名（index/label/role/operations/options）
       // 已经就是「给模型看的形状」，多一层改名只会多一处漂移的地方。
@@ -278,25 +278,71 @@ function buildDecisionBody(model: string, req: DecisionRequest): Record<string, 
 }
 
 /**
- * 页面提示置顶。上游的 `state.page` 只有 url / title / text 三个键，而服务端对多余的键
- * 只回一句 `Invalid request.`（见 buildDecisionBody 末尾），所以提示只能拼进 text。
- * 放在最前面、不参与裁剪：它最短，也最可能解释「为什么上一步没成」。
+ * 页面提示、读不到的 iframe 与视口位置置顶。上游的 `state.page` 只有 url / title / text 三个键，而服务端对多余的键
+ * 只回一句 `Invalid request.`（见 buildDecisionBody 末尾），所以它们只能拼进 text。
+ * 放在最前面、不参与裁剪：它们最短，提示最可能解释「为什么上一步没成」，
+ * 位置告诉模型「视口外还有东西」（见 scrollPosition）。
+ *
+ * 标题里写明「可能与当前任务无关」：通知中心的推送（例如后台任务的「成功5个」）同样是
+ * 浮层 toast，snapshot.js 分不开。一次真跑里模型把这样一条无关的「成功」当成了
+ * 目标要的「导入完成提示」，弹窗里的「确定」还没点就回了 DONE。
  */
-function withNotices(notices: string[], text: string): string {
-  if (notices.length === 0) return text;
-  return `Notices currently shown on the page (toasts / alerts / validation):\n${notices
-    .map((notice) => `- ${notice}`)
-    .join("\n")}\n\nPage text:\n${text}`;
+function withPreamble(state: DecisionRequest["state"], text: string): string {
+  const sections: string[] = [];
+  if (state.notices.length > 0) {
+    sections.push(
+      `Notices currently shown on the page (toasts / alerts / validation; may include unrelated background notifications):\n${state.notices
+        .map((notice) => `- ${notice}`)
+        .join("\n")}`,
+    );
+  }
+  // 跨域 iframe 读不到：不说的话，模型只会觉得「页面上没东西可点」，而不知道是看不见
+  const unreadable = state.unreadableFrames ?? 0;
+  if (unreadable > 0) {
+    sections.push(
+      `${unreadable} embedded cross-origin frame(s) on this page cannot be read: ` +
+        `their contents are not in the element list or page text and cannot be operated.`,
+    );
+  }
+  const position = scrollPosition(state.scroll);
+  if (position !== null) sections.push(position);
+  if (sections.length === 0) return text;
+  return `${sections.join("\n\n")}\n\nPage text:\n${text}`;
+}
+
+/** 视口上下不足这么多像素时不提：几十像素的余量多半是边距，报出来只会诱导无谓的滚动 */
+const SCROLL_HINT_MIN_PX = 40;
+
+/**
+ * 视口在整页里的位置，拼在提示后面、正文前面。理由同 `withPreamble`：`state.page` 没有别的键可用。
+ *
+ * 元素表与正文都只含视口里的东西。一次真跑里目标要「勾选前 2 个产品」，第 2 行在首屏之下，
+ * 模型看不到它、也不知道下面还有内容，勾完第 1 行就去点「批量导入」了。
+ */
+function scrollPosition(scroll: DecisionRequest["state"]["scroll"]): string | null {
+  const above = Math.max(0, Math.round(scroll.y));
+  const below = Math.max(0, Math.round(scroll.height - scroll.y - scroll.viewportHeight));
+  if (above < SCROLL_HINT_MIN_PX && below < SCROLL_HINT_MIN_PX) return null;
+  const parts = [
+    `Elements and page text cover only the visible viewport ` +
+      `(${Math.round(scroll.viewportHeight)}px of a ${Math.round(scroll.height)}px-tall page).`,
+  ];
+  if (above >= SCROLL_HINT_MIN_PX) parts.push(`About ${above}px of content is above (SCROLL_UP to see it).`);
+  if (below >= SCROLL_HINT_MIN_PX) parts.push(`About ${below}px of content is below (SCROLL_DOWN to see it).`);
+  return parts.join(" ");
 }
 
 /**
- * 近期动作的 `action` 串，带上这一步之后弹出的提示。理由同 `withNotices`：
+ * 近期动作的 `action` 串，带上这一步之后弹出的提示。理由同 `withPreamble`：
  * `recent_actions` 的每项只认 action / kind / text / page_changed 四个键。
+ *
+ * 措辞只说「之后可见」，不说「这一步引起了」：提示与动作只是时间上相邻，
+ * 暗示因果会让一条恰好这时弹出的无关通知被读成这一步的结果（见 withPreamble）。
  */
 function actionWithNotices(entry: RecentActionIR): string {
   const notices = entry.notices ?? [];
   if (notices.length === 0) return entry.action;
-  return `${entry.action} (afterwards the page showed: ${notices.join(" | ")})`;
+  return `${entry.action} (notices visible afterwards, not necessarily caused by this action: ${notices.join(" | ")})`;
 }
 
 /**

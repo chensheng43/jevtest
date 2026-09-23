@@ -90,6 +90,12 @@ runs/
 | 画面 | `frame` | **操作前画面**，对应 `frames/<n>.jpg`；未开启截图或截图失败为 `null` |
 | 成本 | `engineUsage` | 该步的 token / 金额 / 重试请求数 |
 
+终止决策（DONE / BLOCKED）不执行动作，因此不在 `steps` 里，单独记在 `terminalDecision`：
+`step` / `operation` / `operationProbability` / `operationProbabilities`（每个候选操作的概率）/
+`confidence` / `distribution` / `url` / `frame` / `engineLatencyMs` / `engineUsage`。
+排查「提前结束」时先看它：模型给 DONE 多少概率、次高的是什么。其它结束方式（预算、护栏、
+无进展、取消、故障）为 `null`；新鲜度复查时被丢弃的终止决策不记；早于这个字段的报告里没有它。
+
 > `pageChanged` 的三态（`true` / `false` / `null`）值得单独说：`null` 不是「没变化」，
 > 而是「没能观测」。无进展检测只应把 `false` 计入连续计数，把 `null` 当成 `false`
 > 会误判卡死——而这恰好发生在页面正常导航的时候。
@@ -215,6 +221,7 @@ JUnit 的映射要点：
 | --- | --- |
 | `runId` / `caseId` / `caseTitle` / `suiteRunId` / `startedAt` | 定位 |
 | `status` / `passed` / `elapsedMs` / `steps` | 结论与规模 |
+| `inputTokens` / `outputTokens` | **`number \| null`**，取自 `stats`（含重试）。列表页的「Token」列用它，因为 TypeSafe 不报金额。`null` 只出现在加这两个字段之前的旧行上，`readIndex` 读时补成 `null` 而不是当坏行跳过 |
 | `costUsd` | **`number \| null`**，与报告里同一纪律：未知就是 `null` |
 
 ---

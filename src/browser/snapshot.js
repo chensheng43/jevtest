@@ -5,7 +5,7 @@
  * (https://github.com/browser-use/jev-ultrafast, MIT License, Copyright (c) 2026 Browser Use)
  * 详见 NOTICE。
  *
- * 相对原版只有五处改动：
+ * 相对原版只有七处改动：
  *   1. 全局缓存名 `window.__jevFast` -> `window.__jev`。
  *   2. 本文件头（原文无）。
  *   3. 候选集收集时加一次 `elementFromPoint` 命中测试（行内标了 `jevtest:`）。
@@ -16,6 +16,11 @@
  *      没有 role 的 `<li>` / `<div>` 靠事件委托可点，上游看不见它们。
  *   5. 额外返回 `notices`：当前可见的页面提示（toast / alert / 表单校验，行内标了 `jevtest:`）。
  *      不进 marker——它的文字本来就在 text 里，新鲜度与指纹不因它另起一套判据。
+ *   6. 没有可访问名的 checkbox / radio / switch，label 补上所在表格行（表头 / 第几行 + 行文本，
+ *      行内标了 `jevtest:`）。上游回退到角色名，表头全选框与每行的复选框同名，模型分不开。
+ *   7. 同源 iframe（行内标了 `jevtest:`）：本脚本在每个同源 frame 里各跑一次，
+ *      子 frame 里的候选几何换算到**顶层视口**坐标，命中测试逐层做到顶层；额外返回 `frame`。
+ *      主文档里这些都是恒等变换，行为与上游一致。拼装各 frame 的结果是 playwright-session.ts 的事。
  * 其余逐字保留——包括变量命名风格，**这是刻意的**：
  * 上游若修复了可访问名解析或守卫语义，我们能直接 diff 而不必重新推导。
  *
@@ -43,7 +48,7 @@
  *
  * 已知边界（与上游一致，见 docs/limitations.md）：
  *   - 不递归 shadow root        （P1 计划支持，约 10 行）
- *   - 不跨 iframe               （P0 只覆盖主文档；P1 用 `f1:e7` 形式限定 id）
+ *   - 只跨同源 iframe           （跨域 frame 读不到；id 的 `f1:e7` 限定由 playwright-session.ts 加）
  *   - 不处理 canvas / 文件上传 / 新标签页 / 嵌套滚动容器
  */
 (() => {
@@ -57,6 +62,24 @@
   const safe = e => !['password','file','hidden'].includes(e.type);
   const visible = e => !e.closest('[aria-hidden="true"],[inert]') &&
     e.checkVisibility({checkOpacity:true,checkVisibilityCSS:true});
+  // jevtest: 同源 iframe。一次真跑里「添加产品」的表单整个在弹窗的 iframe 里，主文档又被弹窗遮罩盖住，
+  // 模型面前只剩空壳，只能回 BLOCKED。输入发在顶层页面上，所以子 frame 的候选必须在顶层点得到：
+  // chain 从本 frame 往上记每一层的 <iframe> 与它的内容区原点（累计到顶层的偏移）。
+  // reachable 逐层要求父文档在该点命中的正是这个 <iframe>——被父文档的遮罩或别的浮层盖住同样点不到。
+  // 主文档里 window===parent，chain 为空：reachable 恒真、偏移为 0，与上游逐字等价。
+  // 祖先跨域（frameElement 为 null）或 <iframe> 本身不可见时换算不了，整个 frame 按读不到处理。
+  const chain=[]; let dx=0, dy=0;
+  for (let w=window; w!==w.parent; w=w.parent) {
+    const f=w.frameElement;
+    if (!f || !visible(f)) return null;
+    const r=f.getBoundingClientRect(), s=w.parent.getComputedStyle(f);
+    dx+=r.x+f.clientLeft+parseFloat(s.paddingLeft); dy+=r.y+f.clientTop+parseFloat(s.paddingTop);
+    chain.push({f,win:w.parent,dx,dy});
+  }
+  const reachable = (x,y) => chain.every(({f,win,dx:ox,dy:oy}) => {
+    const px=x+ox, py=y+oy;
+    return px>=0 && py>=0 && px<win.innerWidth && py<win.innerHeight && win.document.elementFromPoint(px,py)===f;
+  });
   const name = (e,seen=new Set()) => {
     if (!e || seen.has(e)) return '';
     seen.add(e);
@@ -89,6 +112,27 @@
     }
     return null;
   };
+  // jevtest: 没有可访问名的勾选控件，标签里补上它所在的表格行。上游只回退到角色名，
+  // 于是表头全选框与每一行的复选框都叫 `checkbox`：一次真跑里目标写明「勾前 2 个、
+  // 不要点表头全选框」，模型分不出哪个是哪个，第一步就点了全选（一次选中 50 项）。
+  // 只改发给模型的 label；guard 仍用 name(e)，新鲜度判据不变。
+  const clean = value => (value||'').replace(/\s+/g,' ').trim();
+  const rowContext = e => {
+    const row=e.closest('tr,[role="row"]');
+    if (!row) return '';
+    const text=clean(row.innerText).slice(0,80);
+    const header=!!row.closest('thead') || (!!row.querySelector('th,[role="columnheader"]') &&
+      !row.querySelector('td,[role="cell"],[role="gridcell"]'));
+    if (header) return 'header row (usually select all)'+(text ? ' · '+text : '');
+    let index=1;
+    for (let p=row.previousElementSibling; p; p=p.previousElementSibling)
+      if (p.matches('tr,[role="row"]') && !p.querySelector('th,[role="columnheader"]')) index++;
+    return 'row '+index+(text ? ' · '+text : '');
+  };
+  const choiceLabel = (e,rname) => {
+    const context=['checkbox','radio','switch'].includes(rname) ? rowContext(e) : '';
+    return context ? rname+' · '+context : rname;
+  };
   cache.pageKey=()=>[performance.timeOrigin,location.href,scrollX,scrollY,innerWidth,innerHeight,
     [...document.querySelectorAll('input,textarea,select')].filter(safe)
       .map(e=>[identity(e),e.value,e.checked,e.selectedIndex,e.disabled,e.readOnly])];
@@ -107,10 +151,10 @@
     if (!rname || r.width<=0 || r.height<=0 || x<0 || y<0 || x>=innerWidth || y>=innerHeight) continue;
     // jevtest: 中心点被盖住（浮层、弹窗底栏、滚动容器裁掉）就点不到，不进候选集
     const hit=document.elementFromPoint(x,y);
-    if (!hit || (hit!==e && !e.contains(hit))) continue;
+    if (!hit || (hit!==e && !e.contains(hit)) || !reachable(x,y)) continue;
     if (rname==='gridcell' && e.querySelector('button,[role="button"]')) continue;
-    const base={node:identity(e),role:rname,label:name(e)||rname,
-      rect:{x:r.x,y:r.y,w:r.width,h:r.height}};
+    const base={node:identity(e),role:rname,label:name(e)||choiceLabel(e,rname),
+      rect:{x:r.x+dx,y:r.y+dy,w:r.width,h:r.height}};
     for (const key of ['checked','selected','expanded']) {
       const value=e.getAttribute('aria-'+key);
       if (value!==null) base[key]=value;
@@ -148,10 +192,10 @@
     for (let p=e.parentElement; p && !inside; p=p.parentElement) inside=taken.has(p);
     if (inside || !visible(e) || e.closest('[aria-disabled="true"]')) continue;
     const hit=document.elementFromPoint(x,y);
-    if (!hit || (hit!==e && !e.contains(hit))) continue;
+    if (!hit || (hit!==e && !e.contains(hit)) || !reachable(x,y)) continue;
     const label=name(e).replace(/\s+/g,' ').trim().slice(0,120);
     if (!label) continue;
-    actions.push({node:identity(e),role:'button',label,rect:{x:r.x,y:r.y,w:r.width,h:r.height},
+    actions.push({node:identity(e),role:'button',label,rect:{x:r.x+dx,y:r.y+dy,w:r.width,h:r.height},
       kind:'click',value:''});
   }
   const words=[], walker=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT);
@@ -201,6 +245,8 @@
   if (scrollY+innerHeight<height-2) actions.push({id:'scroll_down',kind:'scroll',label:'Scroll down',delta:560});
   if (scrollY>0) actions.push({id:'scroll_up',kind:'scroll',label:'Scroll up',delta:-560});
   actions.push({id:'wait',kind:'wait',label:'Wait for the page to update'});
+  // jevtest: 子 frame 的视口在顶层里的位置（主文档为 null），拼装时据此判断滚轮落在哪个 frame 上
+  const frame=chain.length ? {x:dx,y:dy,w:innerWidth,h:innerHeight} : null;
   return {url:location.href,title:document.title,w:innerWidth,h:innerHeight,text,
-    scroll:{y:scrollY,height},actions,marker,page_key,guards,omitted_actions,notices};
+    scroll:{y:scrollY,height},actions,marker,page_key,guards,omitted_actions,notices,frame};
 })()

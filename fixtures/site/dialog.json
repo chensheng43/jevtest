@@ -1,0 +1,1 @@
+{ "options": ["手动选择SKU", "自动以ListingID或ASIN为SKU", "使用采集SKU作为库存SKU"] }

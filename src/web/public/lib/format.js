@@ -36,6 +36,14 @@ export function count(value) {
   return typeof value === "number" && Number.isFinite(value) ? value.toLocaleString("en-US") : "—";
 }
 
+/** 列表里的大数：49948 -> 49.9k，1234567 -> 1.2M。精确值放 title，用 count()。 */
+export function compactCount(value) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "—";
+  if (value < 1000) return String(Math.round(value));
+  if (value < 999_950) return `${(value / 1000).toFixed(1)}k`;
+  return `${(value / 1_000_000).toFixed(1)}M`;
+}
+
 /** 金额。未知就是「未知」，不能写成 $0（报告的纪律：未知是 null，不是 0）。 */
 export function money(usd) {
   return typeof usd === "number" && Number.isFinite(usd) ? `$${usd.toFixed(4)}` : "未知";

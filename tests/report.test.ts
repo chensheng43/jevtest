@@ -106,6 +106,7 @@ function sampleReport(over: Partial<CaseRunReport> = {}): CaseRunReport {
       finalUrl: "https://example.test/wiki",
       finalFrame: null,
       steps: [stepWith(), stepWith({ step: 2, action: "输入「Gödel」", kind: "fill", text: "Gödel", textEngine: "typesafe" })],
+      terminalDecision: null,
       guardrailHits: [],
       assertion: {
         passed: false,
@@ -158,6 +159,8 @@ function indexEntryWith(over: Partial<RunIndexEntry> = {}): RunIndexEntry {
     passed: true,
     elapsedMs: 1234,
     steps: 3,
+    inputTokens: 1000,
+    outputTokens: 50,
     costUsd: null,
     ...over,
   };
@@ -210,6 +213,7 @@ test("buildReport：时间戳不可解析时退到计量器读数，绝不写 Na
     finalUrl: null,
     finalFrame: null,
     steps: [],
+    terminalDecision: null,
     guardrailHits: [],
     assertion: null,
     stats: {
@@ -340,6 +344,8 @@ test("writeIndex: true 时才写索引，且一行一条摘要", async (t) => {
   assert.equal(entry.caseTitle, report.caseId, "读不到快照时退到 caseId，标题不该让落盘失败");
   assert.equal(entry.steps, 2);
   assert.equal(entry.costUsd, null, "未知金额就是 null");
+  assert.equal(entry.inputTokens, 1234, "列表页的 token 列取自 stats");
+  assert.equal(entry.outputTokens, 56);
 });
 
 test("索引：能读到用例快照里的 title", async (t) => {
@@ -379,6 +385,19 @@ test("readIndex：文件不存在返回空数组；坏行跳过；按时间倒�
     ["new", "mid", "old"],
     "倒序：最新的在最前；坏行被跳过而不是让整个列表打不开",
   );
+});
+
+test("readIndex：加 token 字段之前写下的旧行照常列出，token 记 null 而不是 0", async (t) => {
+  const runsDir = await tempDir(t);
+  const { inputTokens: _input, outputTokens: _output, ...legacy } = indexEntryWith({ runId: "legacy" });
+  await writeFile(join(resolve(runsDir), "index.jsonl"), `${JSON.stringify(legacy)}\n`, "utf8");
+  await appendIndex(runsDir, indexEntryWith({ runId: "current", startedAt: "2026-09-22T00:00:00.000Z" }));
+
+  const entries = await readIndex(runsDir);
+  assert.deepEqual(entries.map((e) => e.runId), ["current", "legacy"], "旧行不能被当坏行跳过");
+  assert.equal(entries[1]?.inputTokens, null, "当时没记就是未知");
+  assert.equal(entries[1]?.outputTokens, null);
+  assert.equal(entries[0]?.inputTokens, 1000);
 });
 
 test("appendIndex：写入口校验——漂移的条目当场抛错，而不是静默写进去没人读得懂", async (t) => {

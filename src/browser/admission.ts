@@ -81,21 +81,6 @@ export const ADMISSION_RULES: readonly AdmissionRule[] = [
         : null,
   },
   {
-    id: "same-origin-frames",
-    severity: "warning",
-    rationale: "limitations.md §2：同源 iframe 技术可读，但当前未实现遍历",
-    hit: (s) => {
-      // `frames` 含主文档（见 AdmissionStats.frames），所以要减掉 1 才是同源子 frame 数。
-      // **这个 1 不能省**：省掉的话任何一个没有 iframe 的页面都会命中本规则，
-      // 准入检查会退化成对每一页都报一条「检测到 1 个同源 iframe」的噪声——
-      // 而假阳性正是这个模块存在的理由。
-      // Math.max 兜住「frame 枚举失败」的 0：那时 frames - crossOrigin 可能算出 -1，
-      // 不兜的话消息里会出现「检测到 -1 个同源 iframe」。
-      const sameOrigin = Math.max(0, s.frames - s.crossOriginFrames - 1);
-      return sameOrigin > 0 ? `检测到 ${sameOrigin} 个同源 iframe，当前只遍历主文档` : null;
-    },
-  },
-  {
     id: "shadow-roots",
     severity: "warning",
     rationale: "limitations.md §1：不递归 shadowRoot，其内部控件不进元素表",
@@ -191,6 +176,3 @@ export function describeAdmission(report: AdmissionReport): string[] {
 
 // TODO(P1): 让 docs/limitations.md 的准入清单从 ADMISSION_RULES 生成，
 //           消除两处事实来源（见 docs/architecture.md §11.2）。
-//           现在这两处已经开始漂移了：limitations.md §2 写的是「frames > 1」，
-//           而规则算的是 frames - crossOriginFrames - 1 > 0——意思一样，
-//           但读的人得自己在脑子里换算一次。

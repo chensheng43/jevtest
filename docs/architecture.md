@@ -88,8 +88,8 @@ POST /api/runs {caseIds: ["wikipedia-godel"]}
               │    ③ 映射回真实 Action  <- 此后模型输出不再有影响力
               │    校验失败 -> InvalidDecision，**不执行任何动作**
               │
-              ├─ policy.overrideWeakBlocked()
-              │    BLOCKED 没过半（< 0.5）-> 改走概率最大的非终止操作（每次运行至多 3 次，见 D20）
+              ├─ policy.overrideWeakTerminal()
+              │    DONE / BLOCKED 没过半（< 0.5）-> 改走概率最大的非终止操作（每次运行合计至多 3 次，见 D20、D25）
               │
               ├─ 若 operation 是 DONE / BLOCKED：
               │    复查页面新鲜度 -> 结束为 done / blocked
@@ -686,6 +686,6 @@ admit(stats, case)  -> AdmissionReport  （纯函数，可单元测试）
 | Playwright 自带 Chromium 与真实 Chrome 的行为差异 | 未知。内部 staging 无所谓，测三方站点时是第一个会踩的坑 |
 | `--enable-automation` 特征是否被站点检测 | 未验证。同上（Wikipedia 未拦） |
 | 轮询在长运行（>5 分钟）下的体验 | 未验证。若不够，再考虑 SSE |
-| shadow DOM 递归 / 跨 iframe | 尚未实现，因此仍在「不支持」清单里 |
+| shadow DOM 递归 / 跨域 iframe | 尚未实现，因此仍在「不支持」清单里（同源 iframe 已支持，见 limitations §2） |
 | 用例 revision diff 视图 | 未实现 |
 | 多引擎一致性投票 | 未实现 |

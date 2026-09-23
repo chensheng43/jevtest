@@ -5,7 +5,7 @@
 import { el, button, setChildren } from "../lib/dom.js";
 import { call } from "../lib/api.js";
 import { isLive, statusLabel } from "../lib/runs.js";
-import { absoluteTime, duration, money, relativeTime } from "../lib/format.js";
+import { absoluteTime, compactCount, count, duration, relativeTime } from "../lib/format.js";
 import { onLeave } from "../lib/router.js";
 import { busy, toast } from "../ui/feedback.js";
 import { emptyState, pageHead, verdictBadge } from "../ui/widgets.js";
@@ -92,7 +92,7 @@ export async function viewRuns(app, params = new URLSearchParams()) {
           el("th", { text: "结束方式" }),
           el("th", { class: "col-num", text: "步数" }),
           el("th", { class: "col-num", text: "耗时" }),
-          el("th", { class: "col-num", text: "成本" }),
+          el("th", { class: "col-num", text: "Token", title: "输入 + 输出 token 合计（含重试）。引擎不报金额，所以这里不列成本" }),
           el("th", { class: "col-time", text: "开始于" }),
           el("th", { class: "col-actions" }),
         ])]),
@@ -167,9 +167,22 @@ export async function viewRuns(app, params = new URLSearchParams()) {
       el("td", { class: run.status === "done" ? "muted" : "", text: live ? "" : statusLabel(run.status) }),
       el("td", { class: "col-num mono", text: String(run.steps) }),
       el("td", { class: "col-num mono", text: duration(run.elapsedMs) }),
-      el("td", { class: "col-num mono", text: money(run.costUsd) }),
+      tokenCell(run),
       el("td", { class: "col-time", title: absoluteTime(run.startedAt), text: relativeTime(run.startedAt) }),
       actions,
     ]);
   }
+}
+
+/** 列里放合计，悬浮看输入/输出拆分。旧记录没存 token（null），照实写「未知」而不是 0。 */
+function tokenCell(run) {
+  const { inputTokens: input, outputTokens: output } = run;
+  if (typeof input !== "number" || typeof output !== "number") {
+    return el("td", { class: "col-num mono muted", title: "这条记录早于 token 统计，没有存", text: "未知" });
+  }
+  return el("td", {
+    class: "col-num mono",
+    title: `输入 ${count(input)} / 输出 ${count(output)}`,
+    text: compactCount(input + output),
+  });
 }

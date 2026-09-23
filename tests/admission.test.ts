@@ -128,13 +128,12 @@ test("file-upload：文件上传控件判 blocking", () => {
   assert.equal(hits(admit(statsWith(), CASE), "文件上传"), false);
 });
 
-test("没有 iframe 的页面不该命中「同源 iframe」", () => {
-  // `frames` 含主文档，所以「只有主文档」是 frames === 1。
-  // 规则若忘了减掉这一个，每一个页面都会被报一次「检测到 1 个同源 iframe」——
-  // 准入检查就成了对谁都说一句废话的噪声源，而假阳性正是它要防的东西。
-  const report = admit(statsWith({ frames: 1 }), CASE);
+test("同源 iframe 已经能遍历，不再给 warning", () => {
+  // 主文档 + 2 个同源 iframe：它们的元素与文本都并进了观测（playwright-session.ts 的 readState）。
+  // 再报「当前只遍历主文档」就是一句假话，而假阳性正是准入要防的东西。
+  const report = admit(statsWith({ frames: 3 }), CASE);
   assert.equal(report.ok, true);
-  assert.deepEqual(report.warnings, [], "只有主文档时不该有任何 warning");
+  assert.deepEqual(report.warnings, []);
 });
 
 test("cross-origin-frames：跨域 iframe 只给 warning，不拦", () => {
@@ -148,19 +147,6 @@ test("cross-origin-frames：跨域 iframe 只给 warning，不拦", () => {
   assert.equal(hits(admit(statsWith(), CASE), "跨域"), false);
 });
 
-test("same-origin-frames：同源 iframe 要减掉主文档再算", () => {
-  // 主文档 + 1 个跨域 + 2 个同源 = 4 个 frame
-  const report = admit(statsWith({ frames: 4, crossOriginFrames: 1 }), CASE);
-  assert.equal(report.ok, true);
-  // 同源 2 个、跨域 1 个 → 两条 warning 各说各的
-  assert.equal(report.warnings.length, 2);
-  assert.ok(report.warnings.some((message) => message.includes("2 个同源 iframe")));
-  assert.ok(report.warnings.some((message) => message.includes("1 个跨域 iframe")));
-
-  // 全是跨域时不该重复报「同源 iframe」
-  const allCrossOrigin = admit(statsWith({ frames: 3, crossOriginFrames: 2 }), CASE);
-  assert.equal(hits(allCrossOrigin, "同源 iframe"), false);
-});
 
 test("shadow-roots：shadow root 给 warning 并点明 P1 计划", () => {
   const report = admit(statsWith({ shadowRoots: 2 }), CASE);
@@ -198,7 +184,7 @@ test("password-fields：密码框给 warning，并点明护栏会拦", () => {
 
 test("ok 严格等于「blocking 为空」，warning 再多也不影响", () => {
   const warningsOnly = admit(
-    statsWith({ shadowRoots: 1, passwordFields: 1, nestedScrollContainers: 1, frames: 2 }),
+    statsWith({ shadowRoots: 1, passwordFields: 1, nestedScrollContainers: 1, frames: 2, crossOriginFrames: 1 }),
     CASE,
   );
   assert.equal(warningsOnly.blocking.length, 0);
@@ -218,7 +204,6 @@ test("规则表逐条可达，且每一条都有对应的触发统计", () => {
     "canvas-only": statsWith({ canvases: 1, interactiveElements: 0 }),
     "file-upload": statsWith({ fileInputs: 1 }),
     "cross-origin-frames": statsWith({ frames: 2, crossOriginFrames: 1 }),
-    "same-origin-frames": statsWith({ frames: 2, crossOriginFrames: 0 }),
     "shadow-roots": statsWith({ shadowRoots: 1 }),
     "nested-scroll": statsWith({ nestedScrollContainers: 1 }),
     "password-fields": statsWith({ passwordFields: 1 }),

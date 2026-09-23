@@ -42,17 +42,23 @@ agent 看不见它们。
 
 ### 2. 跨域 iframe
 
-**状态：不支持（计划用 `f1:e7` 形式支持同源）**
-
-跨域 iframe 内的 DOM 受同源策略保护，`page.evaluate` 在主文档上下文里读不到。
-目前只覆盖主文档。
+**状态：同源 iframe 已支持；跨域 iframe 不支持**
 
 需要区分两种情况：
 
-- **同源 iframe**：技术上可读，但目前没实现遍历。`admission.ts` 会报告
-  `frames > 1` 作为 warning。
+- **同源 iframe**：已支持。`snapshot.js` 在每个同源 frame 里各跑一次，元素与文本并进同一次观测：
+  元素 id 形如 `f1:e7`，正文里每个 iframe 一段、带一行 `[iframe f1: <标题>]`。
+  几何换算到顶层视口，命中测试逐层做到顶层——iframe 被父文档的遮罩或浮层盖住的部分同样点不到。
+  滚轮落点（见 §6）在 iframe 上时，SCROLL_DOWN / SCROLL_UP 与视口位置取自那个 iframe。
+  动作引出 iframe 加载时会等到它 `load`（上限 15s）；观测到白屏的大 iframe 时 agent 先等它渲染（上限 10s），
+  这期间不调用模型（decisions D27）。
+  边界：各 frame 分别读取，跨 frame 不是原子的（每个动作只按它所在 frame 的守卫判新鲜，
+  输入前还会重新做一遍命中测试）；iframe 带 CSS `transform` 缩放或旋转时坐标会算偏。
 - **跨域 iframe**：`page.frames()` 能**准确枚举**（这是 Playwright 比纯 JS 探测强的地方），
-  但内部控件读不到。若 goal 需要与其中的控件交互，直接判 blocking。
+  但内部控件读不到，也不去读（它不在 `allowedOrigins` 的约束范围内）。若 goal 需要与其中的控件交互，直接判 blocking。
+  运行中视口里出现 ≥50x50 的跨域 iframe 时，观测会带上 `unreadableFrames`：模型的提示里、
+  运行日志（warn）里、以 BLOCKED 结束时的失败原因里都会点明「有 N 个跨域 iframe 读不到」。
+  准入探测只在起始页做一次，拦不住运行中途才出现的 iframe，这条就是补它的。
 
 ### 3. Canvas / WebGL 应用
 

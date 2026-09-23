@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>添加产品</title>
+  <script>
+    // `?ready=<ms>`：整页先藏着，等一个慢脚本到了才显示——文档已经解析完、画面却还是白的。
+    // 动态插入的脚本同样推迟 load 事件，这正是真实页面「样式与脚本还在路上」的样子。
+    const ready = new URLSearchParams(location.search).get("ready");
+    if (ready) {
+      document.documentElement.style.visibility = "hidden";
+      const script = document.createElement("script");
+      script.src = `iframe-ready.js?delay=${ready}`;
+      script.async = true;
+      document.head.append(script);
+    }
+  </script>
+  <style>
+    body { margin: 0; padding: 12px; font: 14px/1.5 sans-serif; }
+    label { display: block; margin: 8px 0; }
+    /* 落在父文档 .toast 底下（顶层约 (758, 78) 起）：观测时不该进候选集 */
+    #covered { position: absolute; top: 20px; left: 700px; }
+    /* 撑高文档：「保存模板」在 iframe 首屏之下，要在 iframe 里滚才看得到 */
+    .spacer { height: 800px; }
+  </style>
+</head>
+<body>
+  <h2>创建 eBay 模板</h2>
+  <label>模板标题 <input type="text" id="title" /></label>
+  <label>站点
+    <select id="site">
+      <option value="us">eBay US</option>
+      <option value="uk">eBay UK</option>
+    </select>
+  </label>
+  <button type="button" id="covered">被盖住的按钮</button>
+  <div class="spacer"></div>
+  <button type="button" id="save">保存模板</button>
+  <p id="result"></p>
+
+  <script>
+    document.getElementById("save").addEventListener("click", () => {
+      const site = document.getElementById("site");
+      document.getElementById("result").textContent =
+        `已保存：${document.getElementById("title").value} · ${site.options[site.selectedIndex].text}`;
+    });
+  </script>
+</body>
+</html>

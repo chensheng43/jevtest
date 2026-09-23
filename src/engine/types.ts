@@ -82,11 +82,18 @@ export interface PageStateIR {
   textTruncated: boolean;
   /** 当前可见的页面提示（toast / alert / 表单校验）。文字也在 `text` 里，这里是给引擎置顶用的 */
   notices: string[];
+  /** 视口里看得见、内容却读不到的跨域 iframe 数（见 `Observation.unreadableFrames`）。0 时缺省 */
+  unreadableFrames?: number;
   elements: ElementIR[];
   /** 最近若干步，让模型知道哪些已经做过 */
   recentActions: RecentActionIR[];
   /** 被截断丢弃的候选数，让模型知道「还有东西没看到」 */
   omittedActions: number;
+  /**
+   * 视口在整页里的位置（像素）：`y` 是已滚过的高度，`height` 是整页高度，`viewportHeight` 是视口高度。
+   * 元素表与 `text` 只含视口里的东西，没有这一项，模型不知道下面还有内容、该不该滚。
+   */
+  scroll: { y: number; height: number; viewportHeight: number };
 }
 
 // ---------------------------------------------------------------------------

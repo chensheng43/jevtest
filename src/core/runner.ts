@@ -788,6 +788,7 @@ function skeletonReport(input: {
     startUrl: input.caseDef.startUrl,
     finalUrl: null,
     finalFrame: null,
+    terminalDecision: null,
     steps: input.steps,
     guardrailHits: input.guardrailHits,
     assertion: null,

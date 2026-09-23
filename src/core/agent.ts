@@ -68,6 +68,7 @@ import type {
   AssertionResult,
   CaseRunReport,
   StepRecord,
+  TerminalDecision,
 } from "../schema/report.ts";
 import type { DecisionEngine, DecisionResult, TextRequest } from "../engine/types.ts";
 import { failedCallUsage } from "../engine/types.ts";
@@ -79,11 +80,11 @@ import { GuardrailBlocked, InputInterrupted, OccludedTarget, StalePage } from ".
 import { admit } from "../browser/admission.ts";
 import { assertAllowedOrigin, checkAction, loginRedirectHint } from "./guard.ts";
 import {
-  MAX_WEAK_BLOCKED_OVERRIDES,
+  MAX_WEAK_TERMINAL_OVERRIDES,
   buildActionSpace,
   buildDecisionRequest,
   isTerminal,
-  overrideWeakBlocked,
+  overrideWeakTerminal,
   recentActions,
   resolveDecision,
 } from "./policy.ts";
@@ -102,6 +103,17 @@ export const DEFAULT_NO_PROGRESS_LIMIT = 3;
  * 没有这道闸，一个点不到的目标会一直问到预算耗尽——每问一次都是一次完整的模型调用。
  */
 export const MAX_CONSECUTIVE_DISCARDS = 3;
+
+/**
+ * 观测里有白屏的 iframe（`Observation.blankFrames`）时，最多等它多久再去问模型。
+ *
+ * 白屏时模型什么都读不到，问它只有两种结果：回 WAIT（白花一次调用），或者像一次真跑那样
+ * 对着空壳回 BLOCKED、整轮运行就此结束。所以这段时间里只重新观测，不调用模型。
+ * 同一个 iframe 文档等满了还是白的就不再为它等（真的就是一个空 iframe），交给模型照常决策。
+ */
+export const BLANK_FRAME_WAIT_MS = 10_000;
+/** 等白屏 iframe 时两次观测的间隔 */
+export const BLANK_FRAME_POLL_MS = 500;
 
 /** 在等模型响应时被取消。runner 会按「用户取消 / 进程停机」改写成对应的原因。 */
 const CANCELLED_WHILE_WAITING_ENGINE =
@@ -137,6 +149,8 @@ export interface AgentDeps {
    * 由 runner 按 `recordFrames` 构造——落盘路径是 runner 的事，agent 只要序号。
    */
   captureFrame?: () => Promise<number>;
+  /** 等白屏 iframe 时用的休眠（见 `BLANK_FRAME_WAIT_MS`）。只给测试注入用，缺省是真的 setTimeout */
+  sleep?: (ms: number) => Promise<void>;
 }
 
 /** 一步的结局，`pushRecord` 用它填写 `StepRecord` 里执行侧的那几个字段。 */
@@ -146,6 +160,16 @@ interface StepOutcome {
   text: string | null;
   textEngine: string | null;
   textLatencyMs: number;
+}
+
+/**
+ * BLOCKED 时页面上有读不到的跨域 iframe：把这一点写进失败原因。
+ * 不写的话，读报告的人只看到「模型选择 BLOCKED」，得去翻 trace 才知道目标可能根本不在模型眼里。
+ */
+function unreadableFramesHint(page: Observation): string {
+  const count = page.unreadableFrames ?? 0;
+  if (count === 0) return "";
+  return `；另外页面上有 ${count} 个跨域 iframe，其中的内容读不到也操作不了（只支持同源 iframe），目标可能就在里面`;
 }
 
 export class CaseAgent {
@@ -158,6 +182,8 @@ export class CaseAgent {
   /** 走过的每一步。**这是断言层的核心输入**，任何终态下都要保留 */
   private readonly history: StepRecord[] = [];
   private readonly guardrailHits: { step: number; reason: string; action: string }[] = [];
+  /** 以 DONE / BLOCKED 结束时那次决策；它不产生 StepRecord，只能单独记 */
+  private terminalDecision: TerminalDecision | null = null;
 
   /**
    * 文本取值缓存，键是**整个 helper 输入的指纹**（`textContextKey`）。
@@ -188,8 +214,12 @@ export class CaseAgent {
   private framedPage: Observation | null = null;
   /** 截图失败只警告一次：通常是同一个原因（磁盘、页面崩溃），每步重复一遍只是噪音 */
   private frameWarned = false;
-  /** 已经把几次「没过半的 BLOCKED」改走了别的操作（上限 MAX_WEAK_BLOCKED_OVERRIDES） */
-  private weakBlockedOverrides = 0;
+  /** 已经为多少个读不到的跨域 iframe 警告过。只在数目变多时再报，理由同 `frameWarned` */
+  private unreadableFramesWarned = 0;
+  /** 等满 `BLANK_FRAME_WAIT_MS` 仍是白屏的 iframe（`blankFrames` 的键）。不再为它们等 */
+  private readonly settledBlankFrames = new Set<string>();
+  /** 已经把几次「没过半的 DONE / BLOCKED」改走了别的操作（上限 MAX_WEAK_TERMINAL_OVERRIDES） */
+  private weakTerminalOverrides = 0;
   /** 自上一次成功执行以来，连续丢弃了几次决策（上限 MAX_CONSECUTIVE_DISCARDS） */
   private consecutiveDiscards = 0;
   /**
@@ -260,6 +290,7 @@ export class CaseAgent {
         assertAllowedOrigin(caseDef, caseDef.startUrl);
         this.page = await session.goto(caseDef.startUrl, { waitUntil: "domcontentloaded" });
       }
+      await this.waitOutBlankFrames(signal);
       const page = this.page;
       await this.framePage(page);
       events.emit({
@@ -272,6 +303,8 @@ export class CaseAgent {
         frame: this.pageFrame,
         elapsedMs: budget.stats().elapsedMs,
       });
+
+      this.warnUnreadableFrames(page);
 
       // ---- 2. 仅第一次：准入探测 ------------------------------------------
       // 是记录与警告，**不是运行的闸**（§11.1 ⑥）。放在这里而不是入队时，
@@ -346,20 +379,20 @@ export class CaseAgent {
       // 轨迹经 snapshot() 保留下来）。
       const decided = resolveDecision(space, decision);
 
-      // BLOCKED 会结束运行，所以它必须过半才算数（见 policy.ts 的 BLOCKED_MIN_PROBABILITY）。
+      // DONE / BLOCKED 会结束运行，所以它必须过半才算数（见 policy.ts 的 TERMINAL_MIN_PROBABILITY）。
       // 没过半就改走概率最大的非终止操作——仍然只用模型自己给出的选择，不编造动作。
       const override =
-        this.weakBlockedOverrides < MAX_WEAK_BLOCKED_OVERRIDES ? overrideWeakBlocked(space, decision, decided) : null;
+        this.weakTerminalOverrides < MAX_WEAK_TERMINAL_OVERRIDES ? overrideWeakTerminal(space, decision, decided) : null;
       if (override !== null) {
-        this.weakBlockedOverrides += 1;
+        this.weakTerminalOverrides += 1;
         events.emit({
           type: "run.log",
           runId: this.runId,
           level: "warn",
           message:
-            `模型给 BLOCKED 的概率只有 ${decided.operationProbability.toFixed(2)}，没有过半，不据此结束运行；` +
-            `改走概率次高的 ${override.operation}（${override.operationProbability.toFixed(2)}）` +
-            `（第 ${this.weakBlockedOverrides}/${MAX_WEAK_BLOCKED_OVERRIDES} 次）`,
+            `模型给 ${decided.operation} 的概率只有 ${decided.operationProbability.toFixed(2)}，没有过半，不据此结束运行；` +
+            `改走非终止操作里概率最高的 ${override.operation}（${override.operationProbability.toFixed(2)}）` +
+            `（第 ${this.weakTerminalOverrides}/${MAX_WEAK_TERMINAL_OVERRIDES} 次）`,
         });
       }
       const resolved = override ?? decided;
@@ -398,9 +431,21 @@ export class CaseAgent {
           continue loop;
         }
         this.status = resolved.operation === "DONE" ? "done" : "blocked";
+        this.terminalDecision = {
+          step: this.step,
+          operation: resolved.operation === "DONE" ? "DONE" : "BLOCKED",
+          operationProbability: resolved.operationProbability,
+          operationProbabilities: probabilitiesOf(decision, "operation"),
+          confidence: resolved.confidence,
+          distribution: resolved.distribution,
+          url: page.url,
+          frame: this.pageFrame,
+          engineLatencyMs: decision.latencyMs,
+          engineUsage: decision.usage,
+        };
         failureReason =
           resolved.operation === "BLOCKED"
-            ? "模型选择 BLOCKED：它认为当前页面上没有任何受支持的操作能继续推进"
+            ? "模型选择 BLOCKED：它认为当前页面上没有任何受支持的操作能继续推进" + unreadableFramesHint(page)
             : null;
         break loop;
       }
@@ -652,6 +697,7 @@ export class CaseAgent {
       finalUrl: this.resolveFinalUrl(),
       finalFrame: this.pageFrame,
       steps: this.history,
+      terminalDecision: this.terminalDecision,
       guardrailHits: this.guardrailHits,
       assertion,
       stats,
@@ -760,6 +806,58 @@ export class CaseAgent {
         `点击「${resolved.action.label}」后页面没有变化` +
         (notices.length > 0 ? `（页面提示：${notices.join(" / ")}）` : "") +
         `：页面变化之前不再把它作为点击候选，免得模型反复点同一处`,
+    });
+  }
+
+  /**
+   * 页面里有白屏的 iframe 就先等它渲染出东西来，这期间只重新观测、不调用模型（见 `BLANK_FRAME_WAIT_MS`）。
+   * 等待计入墙钟预算；取消时立刻返回，由循环开头的取消检查收尾。
+   */
+  private async waitOutBlankFrames(signal: AbortSignal): Promise<void> {
+    const pending = (page: Observation | null): string[] =>
+      (page?.blankFrames ?? []).filter((key) => !this.settledBlankFrames.has(key));
+    let blank = pending(this.page);
+    if (blank.length === 0) return;
+    const sleep = this.deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+    const started = Date.now();
+    this.deps.events.emit({
+      type: "run.log",
+      runId: this.runId,
+      level: "info",
+      message: `第 ${this.step} 步：页面里有 iframe 还是白屏（多半还在加载），先等它渲染出内容，这期间不问模型`,
+    });
+    let waited = 0;
+    while (blank.length > 0 && waited < BLANK_FRAME_WAIT_MS && !signal.aborted) {
+      await sleep(BLANK_FRAME_POLL_MS);
+      waited += BLANK_FRAME_POLL_MS;
+      this.page = await this.observeOnce();
+      blank = pending(this.page);
+    }
+    if (signal.aborted) return;
+    if (blank.length > 0) {
+      for (const key of blank) this.settledBlankFrames.add(key);
+      this.deps.events.emit({
+        type: "run.log",
+        runId: this.runId,
+        level: "warn",
+        message: `iframe 等了 ${Math.round((Date.now() - started) / 1000)}s 仍然没有可操作的元素，照常交给模型决策（这个 iframe 不再等）`,
+      });
+    }
+  }
+
+  /**
+   * 页面上出现了读不到的跨域 iframe 就记一条 warn。准入探测只在起始页做一次，
+   * 而弹窗里的 iframe 往往是运行中途才出现的——一次真跑正是这样，报告里只剩一句「模型选择 BLOCKED」。
+   */
+  private warnUnreadableFrames(page: Observation): void {
+    const count = page.unreadableFrames ?? 0;
+    if (count <= this.unreadableFramesWarned) return;
+    this.unreadableFramesWarned = count;
+    this.deps.events.emit({
+      type: "run.log",
+      runId: this.runId,
+      level: "warn",
+      message: `第 ${this.step} 步：页面上有 ${count} 个跨域 iframe，其中的内容读不到也操作不了（只支持同源 iframe）`,
     });
   }
 

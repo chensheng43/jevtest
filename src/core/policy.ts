@@ -376,9 +376,11 @@ export function buildDecisionRequest(input: {
       text: page.text,
       textTruncated: page.textTruncated,
       notices: page.notices,
+      ...(page.unreadableFrames ? { unreadableFrames: page.unreadableFrames } : {}),
       elements: space.elements,
       recentActions: recentActions(history),
       omittedActions: page.omittedActions,
+      scroll: { y: page.scroll.y, height: page.scroll.height, viewportHeight: page.h },
     },
     // budget 原样带上：引擎据此自行裁剪上下文，runner 不必猜它还剩多少额度。
     questions: buildQuestions(space),
@@ -644,26 +646,28 @@ export function resolveDecision(space: ActionSpace, decision: DecisionResult): R
 }
 
 /**
- * 「BLOCKED（放弃）」至少要有这么大的概率，才结束运行。
+ * 终止操作（DONE / BLOCKED）至少要有这么大的概率，才结束运行。
  *
- * BLOCKED 是不可逆的：它直接结束运行，而别的操作走错了一步，下一步还能纠正。
- * 所以对它不能只看「是不是最大项」，还要看是不是**过半**。
- * 实测一次真跑：页面加载完之后，模型给 BLOCKED 0.46、CLICK 0.35、TYPE_TEXT 0.15——
- * 超过一半的概率认为「还能动」，却因为 BLOCKED 单项最大而结束了整个运行。
+ * 终止是不可逆的：它直接结束运行，而别的操作走错了一步，下一步还能纠正。
+ * 所以对它不能只看「是不是最大项」，还要看是不是**过半**。两次真跑各撞上一边：
+ *   - BLOCKED 0.46、CLICK 0.35、TYPE_TEXT 0.15（页面刚加载完）——超过一半的概率认为「还能动」，
+ *     却因为 BLOCKED 单项最大而结束了整个运行；
+ *   - DONE 0.41、CLICK 0.33、BLOCKED 0.18（导入弹窗里「确定」还没点）——一条无关的「成功」通知
+ *     让模型以为做完了，但它自己也只有四成把握。
  */
-export const BLOCKED_MIN_PROBABILITY = 0.5;
+export const TERMINAL_MIN_PROBABILITY = 0.5;
 
 /**
- * 一次运行里最多替换几次「没过半的 BLOCKED」。
- * 真卡死的页面上模型会一直这样犹豫；次数用完之后照常接受 BLOCKED，
+ * 一次运行里最多替换几次「没过半的终止决策」（DONE 与 BLOCKED 合计）。
+ * 真卡死、或真做完了但模型拿不准的页面上，它会一直这样犹豫；次数用完之后照常接受，
  * 不让它靠替换出来的动作一直耗到预算上限。
  */
-export const MAX_WEAK_BLOCKED_OVERRIDES = 3;
+export const MAX_WEAK_TERMINAL_OVERRIDES = 3;
 
 /**
- * BLOCKED 没过半时，改走概率最大的**非终止**操作（及其目标 head 的选择）。
- * 返回 `null` = 不替换，照常接受这个 BLOCKED：
- *   - 不是 BLOCKED，或它已过半；
+ * 终止决策没过半时，改走概率最大的**非终止**操作（及其目标 head 的选择）。
+ * 返回 `null` = 不替换，照常接受这个终止决策：
+ *   - 不是 DONE / BLOCKED，或它已过半；
  *   - 分布是合成的（degenerate）：没有真概率可比；
  *   - 替换目标的回答不可用（该 head 缺失或不合法）。只校验被选中的 head 是
  *     resolveDecision 的纪律，一个没被选中的 head 答坏了，不该让整步失败。
@@ -671,13 +675,13 @@ export const MAX_WEAK_BLOCKED_OVERRIDES = 3;
  * 替换后的 `operationProbability` / `confidence` 如实是那个操作自己的概率（比如 0.35），
  * 报告里看得出这一步是在低把握下走的。
  */
-export function overrideWeakBlocked(
+export function overrideWeakTerminal(
   space: ActionSpace,
   decision: DecisionResult,
   resolved: Resolved,
 ): Resolved | null {
-  if (resolved.operation !== "BLOCKED" || resolved.distribution !== "full") return null;
-  if (resolved.operationProbability >= BLOCKED_MIN_PROBABILITY) return null;
+  if (!isTerminal(resolved.operation) || resolved.distribution !== "full") return null;
+  if (resolved.operationProbability >= TERMINAL_MIN_PROBABILITY) return null;
 
   const questions = buildQuestions(space);
   const operationQuestion = questions.find((question) => question.key === "operation");

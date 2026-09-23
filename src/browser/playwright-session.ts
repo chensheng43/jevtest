@@ -56,7 +56,7 @@
 
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import type { CDPSession, Frame, Page } from "playwright";
+import type { CDPSession, Frame, Page, Request } from "playwright";
 import type { ActionKind } from "../schema/events.ts";
 import type { AdmissionStats } from "../schema/report.ts";
 import { InputInterrupted, JevtestError, OccludedTarget, StalePage, mapBrowserError } from "../core/errors.ts";
@@ -103,9 +103,46 @@ export const DOCUMENT_READY_TIMEOUT_MS = 2_000;
  *
  * 为什么有上限：带轮询、长连接的页面永远等不到 networkidle。等不到就按时继续——
  * 这只是给第一次观测一个更好的起点，不是运行的闸。只用在 goto 上：
- * 每一步动作之后都这样等，会把带轮询的页面每一步都拖长到上限。
+ * networkidle 看的是整页的请求，每一步动作之后都这样等，会把带轮询的页面每一步都拖长到上限。
+ * 动作之后另有一套只看「这次动作引出的请求」的等待，见 `POST_ACTION_QUIET`。
  */
 export const LOAD_SETTLE_TIMEOUT_MS = 5_000;
+
+/**
+ * 动作之后，等页面「安静」多久再交给下一次观测：
+ * 动作之后发出的请求（类型见 `QUIET_RESOURCE_TYPES`）全部返回，且主文档与每个同源 iframe
+ * 的 DOM 都连续 `quietMs` 没有结构变化。
+ *
+ * 为什么需要：输入之后原本只等两帧（`SETTLE_MS`），而弹窗、下拉、分页这类交互通常是
+ * 「外壳立刻出现，内容等接口回来再渲染」。一次真跑里点「导入eBay产品库」之后，
+ * 观测落在弹窗只有标题与「关闭 / 确定」的那一刻——SKU 选项还没到，模型唯一能推进的
+ * 就是「确定」，于是在选 SKU 方式之前就点了它，触发「请输入SKU」，随后还把这次失败的
+ * 点击当成做过的一步，提前回了 DONE。
+ *
+ * 只算**动作之后才发出**的请求：页面上原本挂着的长轮询与这次动作无关，
+ * 算进来会让每一步都等到上限。上限兜住的是动作本身引出的长连接与持续变动的页面——
+ * 等不到就按时继续，这只是给下一次观测一个更好的起点，不是运行的闸（同 `LOAD_SETTLE_TIMEOUT_MS`）。
+ */
+export const POST_ACTION_QUIET = { quietMs: 300, timeoutMs: 3_000 } as const;
+
+/**
+ * 动作引出一个同源 iframe 的加载时，等它文档回来并触发 `load` 的上限（从动作算起）。
+ *
+ * 为什么不沿用 `POST_ACTION_QUIET` 的 3s：一次真跑里「添加产品」弹窗的 iframe 文档就用了 2.2s，
+ * 回来之后还要拉样式与脚本；3s 到点时 iframe 里还是白屏，模型对着空壳回了 BLOCKED。
+ * 这个上限只在「动作之后确实有一个看得见的同源 iframe 开始加载」时才用得上，普通动作不受影响。
+ */
+export const FRAME_LOAD_TIMEOUT_MS = 15_000;
+
+/**
+ * 动作之后要等它返回的请求类型。图片、字体、样式不影响可交互的内容，不等。
+ *
+ * `document` 是为 iframe：弹窗里嵌一个 iframe 时，点击引出的是那个 iframe 的文档请求，
+ * 不等它，观测就落在 iframe 还是 about:blank 的时候。一次真跑里「添加产品」的 iframe
+ * 文档用了 1.7s 才回来。主文档的导航同样是 document 请求，但它会先让页面侧的
+ * settleQuiet 因为执行上下文被销毁而抛错，act 吞掉它之后由 observe 等文档就绪，不受影响。
+ */
+const QUIET_RESOURCE_TYPES: ReadonlySet<string> = new Set(["xhr", "fetch", "script", "document"]);
 
 /**
  * 滚轮事件发送的位置。参考项目固定在 (550, 650)（见 docs/limitations.md §6），
@@ -118,6 +155,29 @@ const WHEEL_AT = { x: 550, y: 650 } as const;
  * 那边是硬编码的，这边只能跟着它，用于判断 `textTruncated`。
  */
 const TEXT_LIMIT = 6000;
+
+/**
+ * 同源子 frame 里的节点身份编码：`frame 序号 * STRIDE + frame 内的节点号`。
+ *
+ * `Action.node` 在 core 里是**全页唯一**的数字（policy 按它归并元素、agent 按它记「点了没反应」），
+ * 而 snapshot.js 在每个 frame 里各自从 1 编号，直接拼起来就会撞号。编码成一个数而不是给 Action
+ * 加一个 frame 字段，是为了让 core 完全不知道 frame 的存在：身份依旧是 code-owned 的整数，
+ * 模型照样看不到它。主文档的节点号原样保留（序号 0），不含 iframe 的页面与改动前逐字相同。
+ * 一个文档里分出去的身份数到 STRIDE 之前早就换过文档了；真到了就丢掉那个候选，不让它撞号。
+ */
+const FRAME_NODE_STRIDE = 1_000_000;
+
+/**
+ * 跨域 iframe 至少这么大（宽和高都算）才算「页面上有一块读不到的内容」。
+ * 广告、统计、登录态同步这类 iframe 常常是 0x0 或 1x1，每步都报它们只是噪音。
+ */
+const UNREADABLE_FRAME_MIN_PX = 50;
+
+/**
+ * 同源 iframe 至少占视口这么大的比例，一个可操作元素都没有时才算「白屏」（`Observation.blankFrames`）。
+ * 弹窗里的表单 iframe 动辄占满视口；小块的空 iframe（图表、统计）多半不是目标，不值得为它等。
+ */
+const BLANK_FRAME_MIN_VIEWPORT_SHARE = 0.25;
 
 export interface PlaywrightSessionOptions {
   /** 由 BrowserPool 提供的已就绪 page。Session 不负责创建或销毁上下文 */
@@ -193,10 +253,31 @@ interface RawSnapshot {
   guards: Record<string, unknown>;
   omitted_actions: number;
   notices?: string[];
+  /** 子 frame 的视口在顶层里的位置；主文档为 null（snapshot.js 第 7 处改动） */
+  frame?: Rect | null;
 }
 
 /** `page_key` 的元组结构，见 snapshot.js 的 `cache.pageKey`。 */
 type RawPageKey = readonly [number, string, number, number, number, number, unknown[]];
+
+/** 一个同源子 frame 的快照。`seq` 见 `FRAME_NODE_STRIDE`。 */
+interface FramePart {
+  seq: number;
+  raw: RawSnapshot;
+}
+
+/** 一次观测读到的全部原始状态：主文档、各同源子 frame，以及看得见却读不了的跨域 frame 数。 */
+interface PageState {
+  main: RawSnapshot;
+  parts: FramePart[];
+  unreadableFrames: number;
+}
+
+/**
+ * 子 frame 里节点的守卫：连同那个 frame 的文档身份（timeOrigin / href）一起存，
+ * 主文档的 pageKey 管不到 iframe 里换没换过文档。主文档节点的守卫仍是 snapshot 给的原样。
+ */
+type FrameGuard = readonly [number | undefined, string | undefined, unknown];
 
 // ---------------------------------------------------------------------------
 // 页面侧的窄接口
@@ -215,12 +296,27 @@ interface PageGlobals {
     elementFromPoint(x: number, y: number): PageElement | null;
   };
   location: { href: string };
+  /** 顶层里 `parent` 就是自己，见 resolveTargetInPage 的逐层命中测试 */
+  parent: PageGlobals;
+  /** 父文档跨域时为 null */
+  frameElement: PageElement | null;
   performance: { now(): number; timeOrigin: number };
   innerWidth: number;
   innerHeight: number;
   requestAnimationFrame(cb: () => void): unknown;
   setTimeout(cb: () => void, ms: number): unknown;
-  getComputedStyle(el: PageElement): { overflowX: string; overflowY: string; cursor: string };
+  clearTimeout(id: unknown): void;
+  MutationObserver: new (callback: () => void) => {
+    observe(target: unknown, options: Record<string, unknown>): void;
+    disconnect(): void;
+  };
+  getComputedStyle(el: PageElement): {
+    overflowX: string;
+    overflowY: string;
+    cursor: string;
+    paddingLeft: string;
+    paddingTop: string;
+  };
 }
 
 interface PageElement {
@@ -236,6 +332,8 @@ interface PageElement {
   scrollWidth: number;
   clientHeight: number;
   clientWidth: number;
+  clientLeft: number;
+  clientTop: number;
   getAttribute(name: string): string | null;
   /** 原生 <select> 设值后要派发 input/change，见 resolveTargetInPage */
   dispatchEvent(event: unknown): boolean;
@@ -347,6 +445,43 @@ function settleCombobox(ms: number): Promise<void> {
   });
 }
 
+/**
+ * 页面侧：等 DOM 连续 `quietMs` 没有变化，上限 `timeoutMs`。
+ *
+ * 不听 `style` 属性：逐帧改 style 的 JS 动画（轮播、进度条）会让这里永远等到上限，
+ * 而内容到达几乎总是表现为节点增删、文本变化或 class / hidden 切换。
+ */
+function settleQuiet(arg: { quietMs: number; timeoutMs: number }): Promise<void> {
+  // 自包含，见上方「页面侧的函数必须自包含」
+  const g = globalThis as unknown as PageGlobals;
+  return new Promise<void>((resolve) => {
+    let done = false;
+    let quiet: unknown = null;
+    let cap: unknown = null;
+    const observer = new g.MutationObserver(() => {
+      g.clearTimeout(quiet);
+      quiet = g.setTimeout(finish, arg.quietMs);
+    });
+    const finish = () => {
+      if (done) return;
+      done = true;
+      observer.disconnect();
+      g.clearTimeout(quiet);
+      g.clearTimeout(cap);
+      resolve();
+    };
+    observer.observe(g.document, {
+      subtree: true,
+      childList: true,
+      characterData: true,
+      attributes: true,
+      attributeFilter: ["class", "hidden", "open", "disabled", "aria-hidden", "aria-busy", "aria-expanded"],
+    });
+    quiet = g.setTimeout(finish, arg.quietMs);
+    cap = g.setTimeout(finish, arg.timeoutMs);
+  });
+}
+
 /** 页面侧：一次 evaluate 里完成的几何重解析 + 遮挡命中测试 + select 设值。 */
 type TargetResolution = { ok: true; x: number; y: number } | { ok: false; reason: string };
 
@@ -384,6 +519,24 @@ function resolveTargetInPage(arg: {
   const hit = g.document.elementFromPoint(x, y);
   if (!hit || (hit !== el && !el.contains(hit))) return { ok: false, reason: "occluded" };
 
+  // 同源 iframe 里的目标：鼠标事件发在顶层页面上，坐标要换算到顶层，
+  // 并且每一层的父文档在该点命中的都必须正是这个 <iframe>。与 snapshot.js 第 7 处改动同一条标准。
+  // 主文档里 parent 就是自己，循环一次都不跑。
+  let topX = x;
+  let topY = y;
+  for (let w = g; w !== w.parent; w = w.parent) {
+    const frameEl = w.frameElement;
+    if (!frameEl) return { ok: false, reason: "frame-unreachable" };
+    const r = frameEl.getBoundingClientRect();
+    const style = w.parent.getComputedStyle(frameEl);
+    topX += r.x + frameEl.clientLeft + parseFloat(style.paddingLeft);
+    topY += r.y + frameEl.clientTop + parseFloat(style.paddingTop);
+    if (topX < 0 || topY < 0 || topX >= w.parent.innerWidth || topY >= w.parent.innerHeight) {
+      return { ok: false, reason: "offscreen" };
+    }
+    if (w.parent.document.elementFromPoint(topX, topY) !== frameEl) return { ok: false, reason: "occluded" };
+  }
+
   if (arg.kind === "select") {
     const wanted = arg.value ?? "";
     let option: PageOption | undefined;
@@ -411,7 +564,7 @@ function resolveTargetInPage(arg: {
   // 一个只想输入内容的控件，不该因为「为了聚焦」而被点一次（可能触发它的 click 处理器）
   if (arg.focus) el.focus();
 
-  return { ok: true, x, y };
+  return { ok: true, x: topX, y: topY };
 }
 
 /** 页面侧：取某节点的当前守卫状态，用于动作级新鲜度比较。 */
@@ -572,11 +725,168 @@ export function createPlaywrightSession(options: PlaywrightSessionOptions): Sess
     }
   }
 
+  /**
+   * 在途请求 → 发出时的序号。序号而不是时间戳：「动作之后才发出」只需要先后，
+   * 不必担心时钟精度（同一毫秒里发出的请求照样分得清）。
+   * page 与 session 同生共死（池为每个会话新开 context），监听器不必摘。
+   */
+  const inflight = new Map<Request, number>();
+  let requestSeq = 0;
+  /** 同源子 frame 最近一次开始加载文档时的请求序号，见 waitForFrameLoads */
+  const frameLoadSeq = new Map<Frame, number>();
+  page.on("request", (request) => {
+    requestSeq += 1;
+    if (QUIET_RESOURCE_TYPES.has(request.resourceType())) inflight.set(request, requestSeq);
+    if (request.resourceType() === "document") {
+      const frame = frameOf(request);
+      const origin = originOf(request.url());
+      if (frame !== null && frame !== page.mainFrame() && (origin === null || origin === originOf(page.url()))) {
+        frameLoadSeq.set(frame, requestSeq);
+      }
+    }
+  });
+  page.on("requestfinished", (request) => inflight.delete(request));
+  page.on("requestfailed", (request) => inflight.delete(request));
+
+  /** 序号大于 `since` 的请求（即动作之后才发出的）是否还有没返回的 */
+  function pendingSince(since: number): boolean {
+    for (const seq of inflight.values()) if (seq > since) return true;
+    return false;
+  }
+
+  /**
+   * 动作之后等页面安静下来，见 `POST_ACTION_QUIET`。
+   *
+   * 两件事交替做到都满足为止：DOM 静止一段时间；动作之后发出的请求全部返回。
+   * 先等 DOM 再看网络，是因为请求常常在点击处理器的下一拍才发出——
+   * 刚点完就看网络会看到「没有在途请求」，而那只是还没来得及发。
+   * 请求返回之后再等一轮 DOM：接口回来到内容渲染完之间还隔着一次渲染。
+   *
+   * 动作引出了同源 iframe 的加载时，先按 `FRAME_LOAD_TIMEOUT_MS` 等它 `load`，
+   * 然后从那一刻起再给一整个 `POST_ACTION_QUIET` 窗口，等 iframe 里的初始化请求与渲染。
+   */
+  async function waitForQuiet(since: number): Promise<void> {
+    const started = Date.now();
+    let deadline = started + POST_ACTION_QUIET.timeoutMs;
+    const loaded = new Set<Frame>();
+    for (;;) {
+      if (await waitForFrameLoads(since, started + FRAME_LOAD_TIMEOUT_MS, loaded)) {
+        deadline = Math.max(deadline, Date.now() + POST_ACTION_QUIET.timeoutMs);
+      }
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) return;
+      const arg = { quietMs: POST_ACTION_QUIET.quietMs, timeoutMs: remaining };
+      // 同源 iframe 各等各的：弹窗里的表单渲染发生在 iframe 的文档里，主文档的 MutationObserver 看不到。
+      // 子 frame 的失败不往上抛：它可能正从 about:blank 导航到真正的文档，没等上就算了，
+      // 那次导航的 document 请求还在 pendingSince 里，下一轮会再等它的新文档一次。
+      await Promise.all([
+        guarded(() => page.evaluate(settleQuiet, arg)),
+        ...splitChildFrames().sameOrigin.map((frame) => frame.evaluate(settleQuiet, arg).catch(() => undefined)),
+      ]);
+      if (!pendingSince(since) && framesToLoad(since, loaded).length === 0) return;
+      // 有 iframe 开始加载就跳出去交给 waitForFrameLoads：它的上限比这里长
+      while (pendingSince(since) && framesToLoad(since, loaded).length === 0 && Date.now() < deadline) {
+        await sleep(50);
+      }
+    }
+  }
+
+  /** 动作之后开始加载、还没等过的同源 iframe */
+  function framesToLoad(since: number, loaded: Set<Frame>): Frame[] {
+    const frames: Frame[] = [];
+    for (const [frame, seq] of frameLoadSeq) {
+      if (frame.isDetached()) frameLoadSeq.delete(frame);
+      else if (seq > since && !loaded.has(frame)) frames.push(frame);
+    }
+    return frames;
+  }
+
+  /**
+   * 等动作引出的同源 iframe 加载完：文档请求返回，然后 `load`（样式、脚本都到了）。
+   * 每个 frame 只等一次。看不见的 iframe 不等：下载、上报用的隐藏 iframe 可能永远不触发 load。
+   * 返回是否真的等过。
+   */
+  async function waitForFrameLoads(since: number, deadline: number, loaded: Set<Frame>): Promise<boolean> {
+    let waited = false;
+    for (const frame of framesToLoad(since, loaded)) {
+      loaded.add(frame);
+      if (!(await shownOnPage(frame))) continue;
+      waited = true;
+      // 文档请求回来之前，waitForLoadState 看到的还是旧文档（about:blank 早就 load 过了）
+      while (documentPending(frame, since) && Date.now() < deadline) await sleep(50);
+      const remaining = deadline - Date.now();
+      if (remaining > 0) await frame.waitForLoadState("load", { timeout: remaining }).catch(() => undefined);
+    }
+    return waited;
+  }
+
+  function documentPending(frame: Frame, since: number): boolean {
+    for (const [request, seq] of inflight) {
+      if (seq > since && request.resourceType() === "document" && frameOf(request) === frame) return true;
+    }
+    return false;
+  }
+
   /** 预热：只在 REQUIRE_FOCUS_EMULATION 为真时做一次 CDP 往返，见文件头。 */
   let warmedUp: Promise<void> | null = null;
   function ensureReady(): Promise<void> {
     warmedUp ??= REQUIRE_FOCUS_EMULATION ? enableFocusEmulation(page) : Promise.resolve();
     return warmedUp;
+  }
+
+  /**
+   * 同源子 frame 的序号（从 1 起；主文档是 0），见 `FRAME_NODE_STRIDE`。
+   *
+   * WeakMap 让同一个 Frame 在多次观测之间保持同一个序号：节点身份要在「观测 → 决策 → 执行」
+   * 之间对得上，agent 的「点了没反应」记录也要在观测之间对得上。iframe 自己导航时 Frame 对象不变、
+   * 序号不变，但 snapshot.js 的节点缓存随文档重置——与主文档导航时一样，陈旧由守卫里的
+   * timeOrigin / href 判出来。
+   */
+  const frameSeqs = new WeakMap<Frame, number>();
+  const framesBySeq = new Map<number, Frame>();
+  let nextFrameSeq = 1;
+
+  function seqOf(frame: Frame): number {
+    let seq = frameSeqs.get(frame);
+    if (seq === undefined) {
+      seq = nextFrameSeq++;
+      frameSeqs.set(frame, seq);
+      framesBySeq.set(seq, frame);
+    }
+    return seq;
+  }
+
+  /** 编码过的节点身份 → 所在 frame 与 frame 内的节点号。frame 已经不在页面上时返回 null */
+  function locateNode(node: number): { frame: Frame; local: number } | null {
+    const seq = Math.floor(node / FRAME_NODE_STRIDE);
+    if (seq === 0) return { frame: page.mainFrame(), local: node };
+    const frame = framesBySeq.get(seq);
+    if (frame === undefined || frame.isDetached()) return null;
+    return { frame, local: node % FRAME_NODE_STRIDE };
+  }
+
+  /**
+   * 主文档之外的 frame，按源分成两类。
+   *
+   * 父 frame 已经跨域的跨域 frame 不单列：外层那个已经算作一块读不到的内容，
+   * 里层再算一次只会把「1 块读不到」报成 2 块。
+   */
+  function splitChildFrames(): { sameOrigin: Frame[]; crossOrigin: Frame[] } {
+    const main = page.mainFrame();
+    const mainOrigin = originOf(main.url());
+    const sameOrigin: Frame[] = [];
+    const crossOrigin: Frame[] = [];
+    const isCross = (frame: Frame): boolean => {
+      const origin = originOf(frame.url());
+      return origin !== null && origin !== mainOrigin;
+    };
+    for (const frame of page.frames()) {
+      if (frame === main) continue;
+      if (!isCross(frame)) sameOrigin.push(frame);
+      else if (!isCross(frame.parentFrame() ?? main)) crossOrigin.push(frame);
+    }
+    for (const [seq, frame] of framesBySeq) if (frame.isDetached()) framesBySeq.delete(seq);
+    return { sameOrigin, crossOrigin };
   }
 
   function toAction(raw: RawAction): Action {
@@ -596,41 +906,160 @@ export function createPlaywrightSession(options: PlaywrightSessionOptions): Sess
     return action;
   }
 
-  function toObservation(raw: RawSnapshot): Observation {
-    const text = typeof raw.text === "string" ? raw.text : "";
-    const scroll = { y: raw.scroll?.y ?? 0, height: raw.scroll?.height ?? 0 };
-    const actions = (raw.actions ?? []).map(toAction);
-    return {
-      url: raw.url,
-      title: raw.title,
+  /**
+   * 把各 frame 的快照拼成一次观测。
+   *
+   * - 元素：主文档的在前，子 frame 的在后；子 frame 的 id 限定成 `f1:e7`、node 按 `FRAME_NODE_STRIDE` 编码。
+   *   几何在 snapshot.js 里已经换算到顶层视口。
+   * - 滚动：滚轮固定发在 `WHEEL_AT`，落在哪个 frame 上滚的就是哪个（弹窗里的 iframe 盖住那一点时，
+   *   滚的是 iframe 而不是底下的主文档）。所以 scroll_down / scroll_up 与 `scroll` 取自那个 frame，
+   *   否则模型会被告知「下面还有内容」而滚不动它。
+   * - 文本：主文档之后逐个接上 iframe 的文本，各带一行标题，好让模型知道哪段在弹窗里。
+   *
+   * 不含 iframe 时逐字等于改动前的结果（marker、文本、元素表都不变）。
+   */
+  function toObservation(state: PageState): Observation {
+    const { main, parts } = state;
+    let wheel: RawSnapshot = main;
+    for (const part of parts) {
+      const box = part.raw.frame;
+      if (
+        box &&
+        WHEEL_AT.x >= box.x &&
+        WHEEL_AT.y >= box.y &&
+        WHEEL_AT.x < box.x + box.w &&
+        WHEEL_AT.y < box.y + box.h
+      ) {
+        wheel = part.raw; // page.frames() 父在子前，最后命中的是最里层
+      }
+    }
+
+    const guards: Record<string, unknown> = { ...(main.guards ?? {}) };
+    const elements: Action[] = [];
+    for (const raw of main.actions ?? []) {
+      if (raw.node === undefined) continue;
+      if (raw.node >= FRAME_NODE_STRIDE) continue; // 会被当成子 frame 的编码，见 FRAME_NODE_STRIDE
+      elements.push(toAction(raw));
+    }
+    let omittedActions = main.omitted_actions ?? 0;
+    const mainText = typeof main.text === "string" ? main.text : "";
+    const texts = mainText === "" ? [] : [mainText];
+    let textTruncated = mainText.length >= TEXT_LIMIT;
+    const notices = new Set(noticesOf(main));
+    const blankFrames: string[] = [];
+    for (const { seq, raw } of parts) {
+      const key = raw.page_key as RawPageKey | undefined;
+      const box = raw.frame;
+      // 不看文字：还没渲染完的页面常常是一层白色遮罩压着已经解析好的 DOM，文字读得到、元素一个都点不到
+      if (
+        box &&
+        box.w * box.h >= BLANK_FRAME_MIN_VIEWPORT_SHARE * main.w * main.h &&
+        !(raw.actions ?? []).some((rawAction) => rawAction.node !== undefined)
+      ) {
+        blankFrames.push(`f${seq}@${String(key?.[0])}`);
+      }
+      for (const rawAction of raw.actions ?? []) {
+        if (rawAction.node === undefined || rawAction.node >= FRAME_NODE_STRIDE) continue;
+        const node = seq * FRAME_NODE_STRIDE + rawAction.node;
+        elements.push(toAction({ ...rawAction, id: `f${seq}:${rawAction.id ?? ""}`, node }));
+        // 子 frame 的守卫连同它的文档身份一起存：主文档的 pageKey 管不到 iframe 里换没换过文档
+        const guard: FrameGuard = [key?.[0], key?.[1], raw.guards?.[String(rawAction.node)]];
+        guards[String(node)] = guard;
+      }
+      omittedActions += raw.omitted_actions ?? 0;
+      const text = typeof raw.text === "string" ? raw.text : "";
+      if (text !== "") texts.push(`[iframe f${seq}: ${raw.title || raw.url}]\n${text}`);
+      textTruncated ||= text.length >= TEXT_LIMIT;
+      for (const notice of noticesOf(raw)) notices.add(notice);
+    }
+
+    const actions = [
+      ...elements,
+      ...(wheel.actions ?? []).filter((raw) => raw.kind === "scroll").map(toAction),
+      ...(main.actions ?? []).filter((raw) => raw.kind === "wait").map(toAction),
+    ];
+    const text = texts.join("\n\n");
+    const scroll = { y: wheel.scroll?.y ?? 0, height: wheel.scroll?.height ?? 0 };
+    const observation: Observation = {
+      url: main.url,
+      title: main.title,
       text,
-      // snapshot.js 把文本切到 6000 字符，到顶就认为被截断了
-      textTruncated: text.length >= TEXT_LIMIT,
-      w: raw.w,
-      h: raw.h,
+      // snapshot.js 把每个 frame 的文本切到 6000 字符，任何一段到顶就认为被截断了
+      textTruncated,
+      w: main.w,
+      h: main.h,
       scroll,
       actions,
-      omittedActions: raw.omitted_actions ?? 0,
-      notices: Array.isArray(raw.notices) ? raw.notices.filter((notice) => typeof notice === "string") : [],
-      marker: raw.marker,
-      pageKey: raw.page_key,
-      guards: raw.guards ?? {},
-      fingerprint: fingerprintOf(raw.url, text, actions, scroll),
+      omittedActions,
+      notices: [...notices],
+      marker: markerOf(state),
+      pageKey: main.page_key,
+      guards,
+      fingerprint: fingerprintOf(main.url, text, actions, scroll),
     };
+    if (state.unreadableFrames > 0) observation.unreadableFrames = state.unreadableFrames;
+    if (blankFrames.length > 0) observation.blankFrames = blankFrames;
+    return observation;
   }
 
-  /** 读一次页面状态。**一次 evaluate 取完**，见 Session.observe 的「原子性」注释。 */
-  async function readState(): Promise<RawSnapshot | null> {
+  /**
+   * 读一次页面状态：主文档 + 每个同源 iframe，各自**一次 evaluate 取完**（见 Session.observe 的「原子性」注释）。
+   *
+   * 跨 frame 做不到原子，也不需要：动作只依据它所在的那个 frame 的守卫判新鲜，
+   * 输入前还会在该 frame 里重解析几何、逐层命中测试到顶层（resolveTargetInPage），
+   * 两次读之间 iframe 被关掉或挪走，都会在那里被拦下。
+   *
+   * 返回 null 只表示**主文档**现在读不了。子 frame 读不了（正在导航、刚被移除、不可见）就当它不在：
+   * 弹窗里的 iframe 还没加载完，不该让整页的观测失败。
+   */
+  async function readState(): Promise<PageState | null> {
     // 以文本注入：snapshot.js 是 IIFE 表达式，求值即得整个状态对象
-    return (await guarded(() => page.evaluate(loadSnapshotSource()))) as RawSnapshot | null;
+    const main = (await guarded(() => page.evaluate(loadSnapshotSource()))) as RawSnapshot | null;
+    if (main === null || typeof main !== "object") return null;
+    const { sameOrigin, crossOrigin } = splitChildFrames();
+    const parts: FramePart[] = [];
+    for (const frame of sameOrigin) {
+      const raw = await readFrameSnapshot(frame);
+      if (raw !== null) parts.push({ seq: seqOf(frame), raw });
+    }
+    let unreadableFrames = 0;
+    for (const frame of crossOrigin) if (await shownOnPage(frame)) unreadableFrames++;
+    return { main, parts, unreadableFrames };
+  }
+
+  /**
+   * 跨域 iframe 是否在视口里占了一块看得见的地方。读不到它的内容，但要能告诉模型与报告
+   * 「这里有一块读不到的东西」——否则目标恰好在里面时，失败原因只剩一句「模型选择 BLOCKED」。
+   */
+  async function shownOnPage(frame: Frame): Promise<boolean> {
+    let handle: Awaited<ReturnType<Frame["frameElement"]>> | null = null;
+    try {
+      handle = await frame.frameElement();
+      if (!(await handle.isVisible())) return false;
+      const box = await handle.boundingBox();
+      const viewport = page.viewportSize() ?? VIEWPORT;
+      return (
+        box !== null &&
+        box.width >= UNREADABLE_FRAME_MIN_PX &&
+        box.height >= UNREADABLE_FRAME_MIN_PX &&
+        box.x < viewport.width &&
+        box.y < viewport.height &&
+        box.x + box.width > 0 &&
+        box.y + box.height > 0
+      );
+    } catch {
+      return false; // frame 在检查途中被移除：它已经不在页面上了
+    } finally {
+      await handle?.dispose().catch(() => undefined);
+    }
   }
 
   async function observe(_options?: ObserveOptions): Promise<Observation> {
     // ObserveOptions.screenshot 在本实现里没有落点：Observation（冻结契约）没有
     // 承载画面的字段，需要画面时调用方另外调 frameJpeg()。见报告「契约矛盾」一节。
     await settle(SETTLE_MS.default, "document");
-    let raw = await readState();
-    if (raw === null || typeof raw !== "object") {
+    let state = await readState();
+    if (state === null) {
       // `snapshot.js` 只认 `document.body` 已存在的文档，因此 null 的含义是
       // **「这个页面现在读不了」**，不是「这个页面坏了」：典型场景是导航在途
       // ——旧文档已卸载、新文档还没解析出 body。
@@ -640,16 +1069,16 @@ export function createPlaywrightSession(options: PlaywrightSessionOptions): Sess
       // 观测是**纯读**，所以等待与重试在这个位置是安全的——「浏览器变更从不重试」
       // 约束的是 act（动作可能已经生效，重试就是执行两次），不是读。
       await waitForDocumentReady();
-      raw = await readState();
+      state = await readState();
     }
-    if (raw === null || typeof raw !== "object") {
+    if (state === null) {
       // 等过文档就绪仍然读不到：归成 StalePage，而不是致命错误。
       // 「读不到这个页面」在语义上就是「这次观测所依据的页面已经不在了」，
       // 而调用方对 StalePage 的既有处理正是正确的反应
       // （动作之后 → 记 `pageChanged: null`；决策之前 → 下一轮重新观测）。
       throw new StalePage("页面当前不可读：document.body 尚未就绪，或文档正在被替换");
     }
-    return toObservation(raw);
+    return toObservation(state);
   }
 
   /**
@@ -684,9 +1113,9 @@ export function createPlaywrightSession(options: PlaywrightSessionOptions): Sess
    * 「模型说完了其实页面早变了」。
    */
   async function wholePageUnchanged(observed: Observation): Promise<boolean> {
-    const raw = await readState();
-    if (!raw) return false;
-    return JSON.stringify(raw.marker) === JSON.stringify(observed.marker);
+    const state = await readState();
+    if (!state) return false;
+    return JSON.stringify(markerOf(state)) === JSON.stringify(observed.marker);
   }
 
   /**
@@ -700,15 +1129,27 @@ export function createPlaywrightSession(options: PlaywrightSessionOptions): Sess
     const node = action.node;
     if (node === undefined) return wholePageUnchanged(observed);
 
-    const key = observed.pageKey as RawPageKey | undefined;
+    const located = locateNode(node);
+    if (located === null) return false; // 所在的 iframe 已经不在页面上了
+    const stored = observed.guards[String(node)];
+    if (stored === undefined) return false;
+
+    // 主文档节点：文档身份取自 pageKey；子 frame 节点：守卫里自带那个 frame 的文档身份（FrameGuard）
+    let key: readonly unknown[] | undefined;
+    let storedGuard: unknown;
+    if (located.frame === page.mainFrame()) {
+      key = observed.pageKey as RawPageKey | undefined;
+      storedGuard = stored;
+    } else {
+      key = stored as FrameGuard;
+      storedGuard = (stored as FrameGuard)[2];
+    }
     if (!Array.isArray(key) || typeof key[0] !== "number" || typeof key[1] !== "string") {
       return false; // 拿不到文档身份就不敢说「还新鲜」，宁可贵一次重新观测
     }
-    const storedGuard = observed.guards[String(node)];
-    if (storedGuard === undefined) return false;
 
     const current = (await guarded(() =>
-      page.evaluate(readGuardInPage, { node }),
+      located.frame.evaluate(readGuardInPage, { node: located.local }),
     )) as ReturnType<typeof readGuardInPage>;
     // 缓存没了 = 文档换过了（导航会重置 window.__jev）
     if (!current) return false;
@@ -734,6 +1175,8 @@ export function createPlaywrightSession(options: PlaywrightSessionOptions): Sess
     }
 
     let settleMode: "document" | "combobox" = "document";
+    // 此后发出的请求才算「这次动作引出的」，见 waitForQuiet
+    const requestsBefore = requestSeq;
 
     if (action.kind === "scroll") {
       await guarded(async () => {
@@ -755,10 +1198,15 @@ export function createPlaywrightSession(options: PlaywrightSessionOptions): Sess
         );
       }
 
-      // 几何重解析 + 遮挡命中测试 + select 设值，全在同一次 evaluate 里（见文件头）
+      const located = locateNode(node);
+      if (located === null) {
+        throw new StalePage(`动作 ${action.id}（${action.label}）所在的 iframe 已经不在页面上了，已放弃执行`);
+      }
+      // 几何重解析 + 遮挡命中测试 + select 设值，全在同一次 evaluate 里（见文件头）。
+      // 在目标所在的 frame 里跑；返回的坐标已经换算到顶层，鼠标事件照常发在 page 上
       const resolution = (await guarded(() =>
-        page.evaluate(resolveTargetInPage, {
-          node,
+        located.frame.evaluate(resolveTargetInPage, {
+          node: located.local,
           kind: action.kind,
           value: action.value ?? null,
           focus: action.kind === "fill",
@@ -800,6 +1248,7 @@ export function createPlaywrightSession(options: PlaywrightSessionOptions): Sess
     // observe() 里暴露出来，不必在这里报。
     try {
       await settle(settleMode === "combobox" ? SETTLE_MS.combobox : SETTLE_MS.default, settleMode);
+      await waitForQuiet(requestsBefore);
     } catch {
       /* 见上 */
     }
@@ -842,12 +1291,9 @@ export function createPlaywrightSession(options: PlaywrightSessionOptions): Sess
     };
 
     const allFrames = page.frames();
-    // `frames` **含主文档在内**（docs/limitations.md §2 的「frames > 1」即指此：
-    // 主文档永远是 1，所以「有 iframe」等价于 `frames > 1`）。
-    // 两个能自圆其说的口径里选了这个，是因为它与文档、与 e2e 用例一致；
-    // 代价是判定侧必须记着减掉主文档那一个，见 admission.ts 的 same-origin-frames。
-    // 注意 allFrames 本身就含主文档：循环里不要再给 frames 计数，否则每个子 frame 被数两次，
-    // 一个跨域 iframe 就会被误报成「检测到 1 个同源 iframe」。
+    // `frames` **含主文档在内**：主文档永远是 1，所以「有 iframe」等价于 `frames > 1`。
+    // 两个能自圆其说的口径里选了这个，是因为它与文档、与 e2e 用例一致。
+    // 注意 allFrames 本身就含主文档：循环里不要再给 frames 计数，否则每个子 frame 被数两次。
     const frames = allFrames.length;
     let crossOriginFrames = 0;
     for (const frame of allFrames) {
@@ -925,6 +1371,33 @@ function fingerprintOf(
   return createHash("sha256").update(payload).digest("hex");
 }
 
+/**
+ * 整页 marker。不含 iframe 时就是主文档的 marker 本身；含 iframe 时把每个 frame 的 marker
+ * 按序号接在后面——iframe 里填了一个值、弹窗里的内容到了，整页都算变过。
+ */
+function markerOf(state: PageState): unknown {
+  if (state.parts.length === 0) return state.main.marker;
+  return [state.main.marker, ...state.parts.map((part) => [part.seq, part.raw.marker])];
+}
+
+function noticesOf(raw: RawSnapshot): string[] {
+  return Array.isArray(raw.notices) ? raw.notices.filter((notice) => typeof notice === "string") : [];
+}
+
+/**
+ * 在一个同源子 frame 里跑 snapshot.js。读不了就返回 null：frame 正在导航、刚被移除，
+ * 或 snapshot.js 判定它在顶层看不见（自身不可见、祖先跨域）。**不过 guarded()**：
+ * 子 frame 的导航是常态，映射成 StalePage 会让整页观测跟着失败。
+ */
+async function readFrameSnapshot(frame: Frame): Promise<RawSnapshot | null> {
+  try {
+    const raw = (await frame.evaluate(loadSnapshotSource())) as RawSnapshot | null;
+    return raw !== null && typeof raw === "object" ? raw : null;
+  } catch {
+    return null;
+  }
+}
+
 /** 把页面侧给的失败原因翻成给人看的一句话。 */
 function describeBlocked(reason: string): string {
   switch (reason) {
@@ -946,9 +1419,24 @@ function describeBlocked(reason: string): string {
       return "该 option 已被禁用";
     case "option-not-set":
       return "设值没有生效（页面在设值后立刻改回了原值）";
+    case "frame-unreachable":
+      return "元素所在的 iframe 已经换不到顶层坐标（它或它的某层父文档变成了跨域）";
     default:
       return reason;
   }
+}
+
+/** 请求所在的 frame。Service Worker 发出的请求没有 frame，Playwright 此时会抛错 */
+function frameOf(request: Request): Frame | null {
+  try {
+    return request.frame();
+  } catch {
+    return null;
+  }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /**

@@ -18,8 +18,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { CaseAgent, DEFAULT_NO_PROGRESS_LIMIT, MAX_CONSECUTIVE_DISCARDS } from "../src/core/agent.ts";
-import { MAX_WEAK_BLOCKED_OVERRIDES } from "../src/core/policy.ts";
+import {
+  BLANK_FRAME_POLL_MS,
+  BLANK_FRAME_WAIT_MS,
+  CaseAgent,
+  DEFAULT_NO_PROGRESS_LIMIT,
+  MAX_CONSECUTIVE_DISCARDS,
+} from "../src/core/agent.ts";
+import { MAX_WEAK_TERMINAL_OVERRIDES } from "../src/core/policy.ts";
 import { createBudgetMeter } from "../src/core/budget.ts";
 import { InputInterrupted, OccludedTarget, StalePage } from "../src/core/errors.ts";
 import { createScriptedEngine, constantSteps } from "../src/engine/scripted.ts";
@@ -63,6 +69,7 @@ async function runCase(input: {
   engine: DecisionEngine;
   signal?: AbortSignal;
   captureFrame?: () => Promise<number>;
+  sleep?: (ms: number) => Promise<void>;
 }): Promise<RunResult> {
   const events: RunEvent[] = [];
   const budget = createBudgetMeter(input.caseDef.budget);
@@ -77,6 +84,7 @@ async function runCase(input: {
     },
     caseDef: input.caseDef,
     ...(input.captureFrame === undefined ? {} : { captureFrame: input.captureFrame }),
+    ...(input.sleep === undefined ? {} : { sleep: input.sleep }),
   });
 
   const report = await agent.run(input.signal ?? new AbortController().signal);
@@ -822,14 +830,14 @@ test("正常路径：degenerate 分布下概率类检查标 skipped -> 整体判
 });
 
 // ---------------------------------------------------------------------------
-// BLOCKED 要过半才结束运行
+// DONE / BLOCKED 要过半才结束运行
 // ---------------------------------------------------------------------------
 
 /**
- * 每次都「BLOCKED 0.45、CLICK 0.40、其余平分 0.15」的引擎——实测那次真跑的形状：
- * 单项最大是 BLOCKED，但过半的概率认为还能动。各 target head 都选第一个候选。
+ * 每次都「<终止操作> 0.45、CLICK 0.40、其余平分 0.15」的引擎——实测那两次真跑的形状：
+ * 单项最大是终止操作，但过半的概率认为还能动。各 target head 都选第一个候选。
  */
-function hesitantBlockedEngine(): DecisionEngine {
+function hesitantEngine(terminal: "DONE" | "BLOCKED"): DecisionEngine {
   const inner = createScriptedEngine({ steps: [] });
   return {
     ...inner,
@@ -839,14 +847,14 @@ function hesitantBlockedEngine(): DecisionEngine {
         const ids = question.options.map((option) => option.id);
         let probabilities: Record<string, number>;
         if (question.key === "operation") {
-          const rest = ids.filter((id) => id !== "BLOCKED" && id !== "CLICK");
+          const rest = ids.filter((id) => id !== terminal && id !== "CLICK");
           probabilities = Object.fromEntries(ids.map((id) => [id, 0.15 / rest.length]));
-          probabilities["BLOCKED"] = 0.45;
+          probabilities[terminal] = 0.45;
           probabilities["CLICK"] = 0.4;
         } else {
           probabilities = Object.fromEntries(ids.map((id, index) => [id, index === 0 ? 1 : 0]));
         }
-        const choice = question.key === "operation" ? "BLOCKED" : (ids[0] ?? "");
+        const choice = question.key === "operation" ? terminal : (ids[0] ?? "");
         answers[question.key] = {
           key: question.key,
           choice,
@@ -873,10 +881,10 @@ test("BLOCKED 没过半不结束运行：改走次高的 CLICK 并留痕；替�
   );
   const session = new FakeSession({ observations: pages });
 
-  const { report, events } = await runCase({ caseDef: makeCase(), session, engine: hesitantBlockedEngine() });
+  const { report, events } = await runCase({ caseDef: makeCase(), session, engine: hesitantEngine("BLOCKED") });
 
-  assert.equal(session.actCount, MAX_WEAK_BLOCKED_OVERRIDES, "每次替换都执行了一个真实动作");
-  assert.equal(report.steps.length, MAX_WEAK_BLOCKED_OVERRIDES);
+  assert.equal(session.actCount, MAX_WEAK_TERMINAL_OVERRIDES, "每次替换都执行了一个真实动作");
+  assert.equal(report.steps.length, MAX_WEAK_TERMINAL_OVERRIDES);
   for (const step of report.steps) {
     assert.equal(step.operation, "CLICK");
     assert.equal(step.operationProbability, 0.4, "记录的是 CLICK 自己的概率，而不是 BLOCKED 的");
@@ -886,9 +894,24 @@ test("BLOCKED 没过半不结束运行：改走次高的 CLICK 并留痕；替�
   const warnings = events.filter(
     (event) => event.type === "run.log" && event.level === "warn" && /没有过半/.test(event.message),
   );
-  assert.equal(warnings.length, MAX_WEAK_BLOCKED_OVERRIDES, "每次替换都在事件里说明了原因");
+  assert.equal(warnings.length, MAX_WEAK_TERMINAL_OVERRIDES, "每次替换都在事件里说明了原因");
   const decided = eventsOf(events, "step.decided").map((event) => (event.type === "step.decided" ? event.operation : ""));
   assert.deepEqual(decided, ["CLICK", "CLICK", "CLICK", "BLOCKED"], "step.decided 报的是实际走的操作");
+});
+
+test("DONE 没过半同样不结束运行；替换次数与 BLOCKED 共用，用完后照常接受并记进 terminalDecision", async () => {
+  const pages = Array.from({ length: 6 }, (_, index) =>
+    richPage({ fingerprint: `fp-${index}`, url: `https://example.test/p${index}` }),
+  );
+  const session = new FakeSession({ observations: pages });
+
+  const { report } = await runCase({ caseDef: makeCase(), session, engine: hesitantEngine("DONE") });
+
+  assert.equal(session.actCount, MAX_WEAK_TERMINAL_OVERRIDES);
+  assert.equal(report.status, "done");
+  assert.equal(report.terminalDecision?.operation, "DONE");
+  assert.equal(report.terminalDecision?.operationProbability, 0.45, "报告如实记下它是在低把握下结束的");
+  assert.equal(report.terminalDecision?.step, MAX_WEAK_TERMINAL_OVERRIDES);
 });
 
 // ---------------------------------------------------------------------------
@@ -919,6 +942,50 @@ test("截图：每次观测一帧，StepRecord.frame 是操作前画面，finalF
   assert.equal(frames.calls(), 2, "同一次观测只截一次：结束时页面没再变，不补帧");
   const observed = eventsOf(events, "step.observed").map((event) => (event.type === "step.observed" ? event.frame : -1));
   assert.deepEqual(observed, [0, 1], "step.observed 带上本次观测的帧号，界面实时显示用它");
+});
+
+test("终止决策：DONE 不产生 StepRecord，但它的概率与所在页面记在 terminalDecision", async () => {
+  const pageA = richPage({ fingerprint: "fp-a", url: "https://example.test/a" });
+  const pageB = richPage({ fingerprint: "fp-b", url: "https://example.test/b" });
+  const session = new FakeSession({ observations: [pageA, pageB] });
+  const engine = createScriptedEngine({
+    steps: [
+      clickLink(),
+      { operation: { choice: "DONE", confidence: 0.55, probabilities: { CLICK: 0.3, TYPE_TEXT: 0, SCROLL_DOWN: 0, WAIT: 0.08, DONE: 0.62, BLOCKED: 0 } } },
+    ],
+  });
+  const frames = countingFrames();
+
+  const { report } = await runCase({ caseDef: makeCase(), session, engine, captureFrame: frames.capture });
+
+  assert.equal(report.status, "done");
+  assert.equal(report.steps.length, 1, "DONE 仍然不是一步");
+  const terminal = report.terminalDecision;
+  assert.ok(terminal, "以 DONE 结束的运行必须留下这次决策");
+  assert.equal(terminal.step, 1);
+  assert.equal(terminal.operation, "DONE");
+  assert.equal(terminal.operationProbability, 0.62);
+  assert.deepEqual(terminal.operationProbabilities, { CLICK: 0.3, TYPE_TEXT: 0, SCROLL_DOWN: 0, WAIT: 0.08, DONE: 0.62, BLOCKED: 0 });
+  assert.equal(terminal.distribution, "full");
+  assert.equal(terminal.url, "https://example.test/b", "记的是做决策时看到的那一页");
+  assert.equal(terminal.frame, 1);
+  assert.equal(terminal.frame, report.finalFrame);
+});
+
+test("终止决策：不是模型自己结束的运行（无进展闸）没有 terminalDecision", async () => {
+  const session = new FakeSession({
+    observations: [richPage({ fingerprint: "fp-same" }), richPage({ fingerprint: "fp-same" })],
+  });
+  const engine = createScriptedEngine({ steps: [clickLink(), clickLink()] });
+
+  const { report } = await runCase({
+    caseDef: makeCase({ assertions: { trajectory: { maxIdenticalConsecutive: 1 } } }),
+    session,
+    engine,
+  });
+
+  assert.equal(report.status, "blocked");
+  assert.equal(report.terminalDecision, null);
 });
 
 test("截图：循环在动作之后直接结束（无进展）时补一帧，finalFrame 不指向旧页面", async () => {
@@ -970,4 +1037,92 @@ test("不开截图时：帧全为 null", async () => {
 
   assert.equal(stepAt(report, 0).frame, null);
   assert.equal(report.finalFrame, null);
+});
+
+// ---------------------------------------------------------------------------
+// 读不到的跨域 iframe
+// ---------------------------------------------------------------------------
+
+test("BLOCKED 时页面上有读不到的跨域 iframe：失败原因点明它；运行中途出现就记 warn，数目不变不重复报", async () => {
+  // 这条来自一次真跑：目标表单在弹窗的 iframe 里，报告只剩一句「模型选择 BLOCKED」，
+  // 准入探测又只在起始页做过一次（那时还没有 iframe），得翻 trace 才知道原因。
+  const pageA = richPage({ fingerprint: "fp-a" });
+  const pageB = richPage({ fingerprint: "fp-b", unreadableFrames: 1 });
+  const pageC = richPage({ fingerprint: "fp-c", unreadableFrames: 1 });
+  const session = new FakeSession({ observations: [pageA, pageB, pageC] });
+  const engine = createScriptedEngine({ steps: [clickLink(), clickLink(), { operation: { choice: "BLOCKED" } }] });
+
+  const { report, events } = await runCase({ caseDef: makeCase(), session, engine });
+
+  assert.equal(report.status, "blocked");
+  assert.match(report.failureReason ?? "", /^模型选择 BLOCKED：.*；另外页面上有 1 个跨域 iframe，其中的内容读不到也操作不了/);
+  const warnings = eventsOf(events, "run.log").filter(
+    (event) => event.type === "run.log" && event.level === "warn" && event.message.includes("跨域 iframe"),
+  );
+  assert.equal(warnings.length, 1, "同样的 iframe 每步重复一遍只是噪音");
+  assert.match((warnings[0] as { message: string }).message, /^第 1 步/);
+});
+
+test("没有读不到的 iframe 时，BLOCKED 的失败原因保持原样", async () => {
+  const session = new FakeSession({ observations: [richPage()] });
+  const engine = createScriptedEngine({ steps: [{ operation: { choice: "BLOCKED" } }] });
+
+  const { report } = await runCase({ caseDef: makeCase(), session, engine });
+
+  assert.equal(report.failureReason, "模型选择 BLOCKED：它认为当前页面上没有任何受支持的操作能继续推进");
+});
+
+// ---------------------------------------------------------------------------
+// 白屏的 iframe：先等，不问模型
+// ---------------------------------------------------------------------------
+
+test("iframe 白屏时先等它渲染，不调用模型；渲染出来之后照常决策", async () => {
+  // 这条来自一次真跑：iframe 还在加载、画面全白，模型对着空壳回了 BLOCKED。
+  const blank = richPage({ fingerprint: "fp-blank", blankFrames: ["f1@100"] });
+  const ready = richPage({ fingerprint: "fp-ready" });
+  const session = new FakeSession({ observations: [blank, blank, ready] });
+  const seen: DecisionRequest[] = [];
+  const inner = createScriptedEngine({ steps: [done()] });
+  const engine: DecisionEngine = { ...inner, decide: (req, signal) => (seen.push(req), inner.decide(req, signal)) };
+  const sleeps: number[] = [];
+
+  const { report, events } = await runCase({
+    caseDef: makeCase(),
+    session,
+    engine,
+    sleep: async (ms) => {
+      sleeps.push(ms);
+    },
+  });
+
+  assert.equal(report.status, "done");
+  assert.equal(seen.length, 1, "白屏期间一次模型都不问");
+  assert.deepEqual(sleeps, [BLANK_FRAME_POLL_MS, BLANK_FRAME_POLL_MS]);
+  assert.ok(
+    eventsOf(events, "run.log").some((event) => event.type === "run.log" && event.message.includes("白屏")),
+    "等待要留痕：报告里看得出这段时间去哪了",
+  );
+});
+
+test("iframe 等满上限仍是白屏：交给模型并留 warn；同一个 iframe 文档之后不再等", async () => {
+  const blank = richPage({ fingerprint: "fp-blank", blankFrames: ["f1@100"] });
+  const session = new FakeSession({ observations: [blank] });
+  const engine = createScriptedEngine({ steps: [clickLink(), done()] });
+  let sleeps = 0;
+
+  const { report, events } = await runCase({
+    caseDef: makeCase(),
+    session,
+    engine,
+    sleep: async () => {
+      sleeps += 1;
+    },
+  });
+
+  assert.equal(report.status, "done");
+  assert.equal(sleeps, BLANK_FRAME_WAIT_MS / BLANK_FRAME_POLL_MS, "只在第一次遇到它时等满一次");
+  const warnings = eventsOf(events, "run.log").filter(
+    (event) => event.type === "run.log" && event.level === "warn" && event.message.includes("没有可操作的元素"),
+  );
+  assert.equal(warnings.length, 1);
 });
